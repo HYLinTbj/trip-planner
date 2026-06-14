@@ -1,0 +1,121 @@
+{
+  "denver-art-museum": {
+    "name": "Denver Art Museum",
+    "lat": 39.7372,
+    "lon": -104.9893,
+    "dwell_min": 90,
+    "importance": 0.8,
+    "hours": {
+      "default": {
+        "open": "10:00",
+        "close": "17:00"
+      }
+    },
+    "tags": [
+      "museum",
+      "indoor"
+    ],
+    "status": "idea"
+  },
+  "botanic-gardens": {
+    "name": "Denver Botanic Gardens",
+    "lat": 39.732,
+    "lon": -104.9609,
+    "dwell_min": 75,
+    "importance": 0.7,
+    "hours": {
+      "default": {
+        "open": "09:00",
+        "close": "17:00"
+      }
+    },
+    "tags": [
+      "garden",
+      "nature"
+    ],
+    "status": "idea"
+  },
+  "nature-science": {
+    "name": "Museum of Nature & Science",
+    "lat": 39.7475,
+    "lon": -104.9426,
+    "dwell_min": 120,
+    "importance": 0.75,
+    "hours": {
+      "default": {
+        "open": "09:00",
+        "close": "17:00"
+      }
+    },
+    "tags": [
+      "museum",
+      "family"
+    ],
+    "status": "idea"
+  },
+  "denver-zoo": {
+    "name": "Denver Zoo",
+    "lat": 39.7503,
+    "lon": -104.9512,
+    "dwell_min": 120,
+    "importance": 0.65,
+    "hours": {
+      "default": {
+        "open": "09:00",
+        "close": "17:00"
+      }
+    },
+    "tags": [
+      "zoo",
+      "family"
+    ],
+    "status": "idea"
+  },
+  "coors-field": {
+    "name": "Coors Field",
+    "lat": 39.7559,
+    "lon": -104.9942,
+    "dwell_min": 60,
+    "importance": 0.6,
+    "tags": [
+      "baseball",
+      "ballpark"
+    ],
+    "status": "idea"
+  },
+  "sixteenth-street-mall": {
+    "name": "16th Street Mall",
+    "lat": 39.746,
+    "lon": -104.992,
+    "dwell_min": 60,
+    "importance": 0.7,
+    "tags": [
+      "shopping",
+      "walk",
+      "food"
+    ],
+    "status": "idea"
+  },
+  "union-station": {
+    "name": "Denver Union Station",
+    "lat": 39.7539,
+    "lon": -104.9998,
+    "dwell_min": 45,
+    "importance": 0.6,
+    "tags": [
+      "historic",
+      "transit",
+      "food"
+    ],
+    "status": "idea"
+  },
+  "estes-park": {
+    "name": "Estes Park",
+    "lat": 40.377282271309,
+    "lon": -105.52488327026369,
+    "dwell_min": 60,
+    "importance": 0.6,
+    "tags": [],
+    "status": "idea"
+  }
+}

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trip Planner</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="side">
+      <div class="topbar">
+        <h1>Trip Planner</h1>
+        <label class="city-pick">City
+          <select id="city"></select>
+        </label>
+      </div>
+
+      <!-- Current trip: name / status / date / save -->
+      <div id="trip-header" class="trip-header">
+        <input id="trip-title" class="trip-title" placeholder="Unsaved draft — name it to save" />
+        <div class="trip-meta">
+          <select id="trip-status" title="Trip status">
+            <option value="draft">draft</option>
+            <option value="upcoming">upcoming</option>
+            <option value="completed">completed</option>
+          </select>
+          <input id="trip-date" type="date" title="Start date" />
+          <button id="trip-save" class="save">Save</button>
+        </div>
+        <div class="trip-subrow">
+          <span id="trip-tag" class="muted">Unsaved draft</span>
+          <button id="trip-saveas" class="linkbtn" hidden>save as new</button>
+          <button id="trip-new" class="linkbtn">new draft</button>
+        </div>
+      </div>
+
+      <div class="search">
+        <input id="q" placeholder="🔍 Search a place to add…" autocomplete="off" />
+        <div id="results" class="results"></div>
+      </div>
+
+      <form id="addform" class="addform" hidden>
+        <h2>Add to library</h2>
+        <label>Name<input id="f-name" autocomplete="off" /></label>
+        <div class="grid2">
+          <label>Importance
+            <select id="f-importance">
+              <option value="0.9">High</option>
+              <option value="0.6" selected>Medium</option>
+              <option value="0.3">Low</option>
+            </select>
+          </label>
+          <label>Dwell (min)<input id="f-dwell" type="number" value="60" min="0" /></label>
+          <label>Opens<input id="f-open" placeholder="09:00" /></label>
+          <label>Closes<input id="f-close" placeholder="17:00" /></label>
+        </div>
+        <label>Tags<input id="f-tags" placeholder="temple, garden, quiet" /></label>
+        <label>Notes<input id="f-notes" autocomplete="off" /></label>
+        <div class="btns">
+          <button type="submit">Add to library</button>
+          <button type="button" id="f-cancel" class="secondary">Cancel</button>
+        </div>
+        <div class="hint muted">Drag the 📍 pin to fine-tune the spot, or click the map to move it.</div>
+      </form>
+
+      <details class="sec">
+        <summary>✨ Suggest places (AI)</summary>
+        <div class="suggest">
+          <textarea id="brief" rows="3" placeholder="Describe your trip — e.g. '4 days in Kyoto in winter with kids, love nature and food, hate crowds'"></textarea>
+          <div class="grid2">
+            <label>Area<input id="brief-area" placeholder="Kyoto, Japan" /></label>
+            <label>How many<input id="brief-count" type="number" value="8" min="1" max="20" /></label>
+          </div>
+          <button id="suggest" type="button">✨ Suggest places</button>
+          <div id="candidates"></div>
+        </div>
+      </details>
+
+      <details class="sec" open>
+        <summary>Trip settings</summary>
+        <div class="ctl">
+          <label>Days<input id="days" type="number" value="2" min="1" /></label>
+          <label>Balance<input id="balance" type="number" value="5" min="0" /></label>
+          <label>Start<input id="start" value="09:00" /></label>
+          <label>End<input id="end" value="19:00" /></label>
+          <label>Base lat<input id="blat" value="34.9858" /></label>
+          <label>Base lon<input id="blon" value="135.7588" /></label>
+          <label>Mode
+            <select id="profile">
+              <option value="foot" selected>walking</option>
+              <option value="car">driving</option>
+              <option value="transit">transit</option>
+            </select>
+          </label>
+        </div>
+        <div class="btns">
+          <button id="go">Plan (fresh)</button>
+          <button id="reopt" class="secondary">Re-optimize</button>
+        </div>
+        <div id="status" class="muted">Loading…</div>
+      </details>
+
+      <details class="sec" open>
+        <summary>Itinerary</summary>
+        <p class="hint muted">Edit freely — move a stop, 🔒 lock it, ⏰ pin its time, ✕ remove it,
+          or ＋ pull a dropped POI back in — then hit <b>Re-optimize</b> to apply.</p>
+        <div id="timeline"></div>
+      </details>
+
+      <details class="sec" id="sec-trips">
+        <summary>Saved trips</summary>
+        <div id="trips" class="trips muted">No trips yet.</div>
+      </details>
+    </aside>
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,95 @@
+# Trip Planner — full stack on one host (scale-up phase 4).
+#
+#   docker compose up -d --build
+#
+# Serves: the FastAPI api (:8000, which also serves the static frontend) + Postgres
+# + 4 regional Valhalla engines (northeast/midwest/south/west) + a legacy fallback
+# engine (kyoto). The api routes each city to its census region's engine by container
+# name (VALHALLA_REGION_URL_TEMPLATE -> http://valhalla-<region>:8002).
+#
+# Region tilesets are built SEPARATELY (not by compose; they're big and occasional):
+#   python scripts/build_engine.py <region> --rebuild   # -> data/regions/<region>/custom
+# These services just serve the pre-built tiles.
+
+x-region-engine: &region-engine
+  image: ghcr.io/valhalla/valhalla@sha256:ef65407f8cae345084a1be3eae450d3e985ecba01778dc0d96b8c9caa935cdc6
+  entrypoint: ["valhalla_service", "/custom_files/valhalla.json", "2"]
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tripplanner
+      POSTGRES_PASSWORD: tripplanner
+      POSTGRES_DB: tripplanner
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tripplanner"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  valhalla-northeast:
+    <<: *region-engine
+    volumes: ["./data/regions/northeast/custom:/custom_files"]
+    ports: ["8101:8002"]
+  valhalla-midwest:
+    <<: *region-engine
+    volumes: ["./data/regions/midwest/custom:/custom_files"]
+    ports: ["8102:8002"]
+  valhalla-south:
+    <<: *region-engine
+    volumes: ["./data/regions/south/custom:/custom_files"]
+    ports: ["8103:8002"]
+  valhalla-west:
+    <<: *region-engine
+    volumes: ["./data/regions/west/custom:/custom_files"]
+    ports: ["8104:8002"]
+
+  # Legacy / non-US fallback engine (kyoto). The api's VALHALLA_URL points here for
+  # any city whose region isn't one of the US census engines.
+  valhalla:
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    volumes: ["./data/valhalla:/custom_files"]
+    ports: ["8002:8002"]
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://tripplanner:tripplanner@db:5432/tripplanner
+      VALHALLA_REGION_URL_TEMPLATE: "http://valhalla-{region}:8002"
+      VALHALLA_URL: "http://valhalla:8002"
+      DEFAULT_CITY: denver
+      BASE_LAT: "39.7539"
+      BASE_LON: "-104.9965"
+      BASE_NAME: "Denver Union Station"
+      CITY_LABEL: "Denver, USA (RTD — single regional operator)"
+    # Dev convenience: serve the frontend live from the host so UI edits show on a
+    # browser refresh (no image rebuild). The Dockerfile still bakes frontend/ for prod.
+    volumes:
+      - ./frontend:/app/frontend:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      valhalla-northeast:
+        condition: service_started
+      valhalla-midwest:
+        condition: service_started
+      valhalla-south:
+        condition: service_started
+      valhalla-west:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  pgdata:

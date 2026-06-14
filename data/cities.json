@@ -1,0 +1,26 @@
+{
+  "boston": {
+    "label": "Boston, USA (MBTA subway + light rail)",
+    "pbf_url": "https://download.geofabrik.de/north-america/us/massachusetts-latest.osm.pbf",
+    "gtfs": [{ "name": "mbta", "url": "https://cdn.mbta.com/MBTA_GTFS.zip", "route_types": [0, 1] }],
+    "base": { "lat": 42.3519, "lon": -71.0552, "name": "South Station" },
+    "depart": "2026-06-09T10:00",
+    "port": 8003
+  },
+  "denver": {
+    "label": "Denver, USA (RTD — single regional operator)",
+    "pbf_url": "https://download.geofabrik.de/north-america/us/colorado-latest.osm.pbf",
+    "gtfs": [{ "name": "rtd", "url": "https://www.rtd-denver.com/files/gtfs/google_transit.zip" }],
+    "base": { "lat": 39.7539, "lon": -104.9965, "name": "Denver Union Station" },
+    "depart": "2026-06-09T10:00",
+    "port": 8004
+  },
+  "kyoto": {
+    "label": "Kyoto, Japan (the default app engine; transit needs an ODPT dev key)",
+    "pbf_url": "https://download.geofabrik.de/asia/japan/kansai-latest.osm.pbf",
+    "gtfs": [],
+    "base": { "lat": 34.9858, "lon": 135.7588, "name": "Kyoto Station" },
+    "port": 8002,
+    "note": "Already served foot/car on :8002 by scripts/serve.sh + docker-compose.yml. Adding transit needs the Kyoto City Bus GTFS (ODPT key) as a gtfs[] entry, then onboard."
+  }
+}

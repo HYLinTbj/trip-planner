@@ -1,0 +1,33 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OSRM extracts + per-profile graphs (large; rebuild with scripts/build_osrm.sh)
+data/osrm/*.osm.pbf
+data/osrm/*.osrm*
+data/osrm/foot/
+data/osrm/car/
+
+# Valhalla spike tiles (large; rebuilt by docker-compose.valhalla.yml)
+data/valhalla/
+
+# Cached OSRM travel-time matrices (derived)
+data/matrix_cache.json
+
+# Live POI store (user-mutable; seeded from pois.sample.json on first run)
+data/pois.json
+
+# Local secrets / config (LLM keys + endpoint overrides)
+.env
+
+# Transit spike artifacts (Boston/MBTA; deletable)
+data/spike-boston/
+
+# Onboarded city routing bundles (large; rebuild with scripts/onboard_city.py)
+data/cities/
+
+# Regional Valhalla routing bundles (very large, ~tens of GB; rebuild with
+# scripts/build_engine.py). NB: data/regions.json (the small catalog) stays tracked —
+# the trailing slash matches only the directory.
+data/regions/

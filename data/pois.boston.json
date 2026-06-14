@@ -1,0 +1,40 @@
+{
+  "harvard-yard": {
+    "name": "Harvard Yard", "lat": 42.3744, "lon": -71.1169,
+    "dwell_min": 60, "importance": 0.8, "tags": ["university", "historic"], "status": "idea"
+  },
+  "mit": {
+    "name": "MIT", "lat": 42.3601, "lon": -71.0921,
+    "dwell_min": 45, "importance": 0.6, "tags": ["university"], "status": "idea"
+  },
+  "fenway-park": {
+    "name": "Fenway Park", "lat": 42.3467, "lon": -71.0972,
+    "dwell_min": 90, "importance": 0.85,
+    "hours": { "default": { "open": "09:00", "close": "17:00" } },
+    "tags": ["baseball", "iconic"], "status": "idea"
+  },
+  "boston-common": {
+    "name": "Boston Common", "lat": 42.3550, "lon": -71.0656,
+    "dwell_min": 45, "importance": 0.7, "tags": ["park", "walk"], "status": "idea"
+  },
+  "faneuil-hall": {
+    "name": "Faneuil Hall Marketplace", "lat": 42.3601, "lon": -71.0568,
+    "dwell_min": 60, "importance": 0.75, "tags": ["market", "historic", "food"], "status": "idea"
+  },
+  "mfa": {
+    "name": "Museum of Fine Arts", "lat": 42.3394, "lon": -71.0942,
+    "dwell_min": 120, "importance": 0.8,
+    "hours": { "default": { "open": "10:00", "close": "17:00" } },
+    "tags": ["museum", "indoor"], "status": "idea"
+  },
+  "aquarium": {
+    "name": "New England Aquarium", "lat": 42.3592, "lon": -71.0494,
+    "dwell_min": 90, "importance": 0.7,
+    "hours": { "default": { "open": "09:00", "close": "18:00" } },
+    "tags": ["aquarium", "family"], "status": "idea"
+  },
+  "bunker-hill": {
+    "name": "Bunker Hill Monument", "lat": 42.3764, "lon": -71.0608,
+    "dwell_min": 45, "importance": 0.6, "tags": ["historic", "monument"], "status": "idea"
+  }
+}

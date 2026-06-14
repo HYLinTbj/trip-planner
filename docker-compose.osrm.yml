@@ -1,0 +1,22 @@
+# OSRM fallback engine (set ROUTING_ENGINE=osrm) — one instance per profile.
+# Build graphs first:
+#   bash scripts/build_osrm.sh              # foot
+#   PROFILE=car bash scripts/build_osrm.sh  # car (reuses the cached extract)
+# then `docker compose -f docker-compose.osrm.yml up -d`.  foot -> :5000, car -> :5001.
+services:
+  osrm-foot:
+    image: osrm/osrm-backend:latest
+    command: osrm-routed --algorithm mld /data/region.osrm
+    volumes:
+      - ./data/osrm/foot:/data
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+  osrm-car:
+    image: osrm/osrm-backend:latest
+    command: osrm-routed --algorithm mld /data/region.osrm
+    volumes:
+      - ./data/osrm/car:/data
+    ports:
+      - "5001:5000"
+    restart: unless-stopped

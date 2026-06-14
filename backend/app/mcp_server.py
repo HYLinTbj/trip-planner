@@ -1,0 +1,132 @@
+"""MCP server — drive the trip planner from any MCP client (Claude Desktop/Code, …).
+
+"AI proposes, the app disposes" over MCP: the external agent proposes place *names*;
+these tools ground and dispose. `search_places` resolves a name to real coordinates
+(our Nominatim proxy); `add_poi` stores a grounded place and deliberately accepts NO
+opening hours — the agent can't fabricate them, they come from OSM/curation; and
+`plan_trip` returns a feasibility-checked itinerary from the same solver + routing
+engine the web app uses. Same grounding, different front door.
+
+Run over stdio:   python -m app.mcp_server      (from the backend/ directory)
+"""
+
+from mcp.server.fastmcp import FastMCP
+
+from . import geocode, main, store
+from .db import SessionLocal
+from .models import Lock, POICreate
+
+mcp = FastMCP("trip-planner")
+
+# One server serves every city: each tool takes a per-call `city` argument that
+# scopes the POI library, saved plans, and (via main._run) which regional routing
+# engine is queried. `CITY` is just the default (the launcher's DEFAULT_CITY), so
+# existing single-city callers keep working unchanged.
+CITY = main.DEFAULT_CITY
+
+
+@mcp.tool()
+def search_places(query: str, limit: int = 5) -> list[dict]:
+    """Resolve a place name to real coordinates via OpenStreetMap (Nominatim).
+    Use this to GROUND a place you're proposing before adding it — never invent
+    coordinates yourself. Returns up to `limit` candidates: {name, display_name,
+    lat, lon}."""
+    return geocode.search(query, limit=limit)
+
+
+@mcp.tool()
+def list_pois(city: str = CITY) -> list[dict]:
+    """List every POI in the user's library (planned or not), with id/name/coords/
+    importance/tags."""
+    with SessionLocal() as db:
+        return [p.model_dump(mode="json") for p in store.load_pois(city, db).values()]
+
+
+@mcp.tool()
+def add_poi(name: str, lat: float, lon: float, importance: float = 0.5,
+            dwell_min: int = 60, tags: list[str] | None = None,
+            notes: str | None = None, city: str = CITY) -> dict:
+    """Add a grounded place to the library. Get `lat`/`lon` from `search_places`
+    first. Opening hours are intentionally NOT accepted here — they must come from
+    real data, not a model. `importance` (0–1) governs drop order when a day is
+    tight; `dwell_min` is the typical visit length in minutes. Returns the stored POI."""
+    with SessionLocal() as db:
+        poi = store.add_poi(city, POICreate(
+            name=name, lat=lat, lon=lon, importance=importance,
+            dwell_min=dwell_min, tags=tags or [], notes=notes), db)
+    return poi.model_dump(mode="json")
+
+
+@mcp.tool()
+def delete_poi(poi_id: str, city: str = CITY) -> dict:
+    """Remove a POI from `city`'s library by its id."""
+    with SessionLocal() as db:
+        return {"deleted": poi_id, "existed": store.delete_poi(city, poi_id, db)}
+
+
+@mcp.tool()
+def plan_trip(days: int = 2, start: str = "09:00", end: str = "19:00",
+              base_lat: float | None = None, base_lon: float | None = None,
+              balance: int = 5, profile: str = "foot",
+              locks: list[dict] | None = None, city: str = CITY) -> dict:
+    """Build a feasibility-checked itinerary over the library (respecting opening
+    hours, dwell time, and real travel time). `profile` is "foot" or "car". `locks`
+    are the user's dispositions — each {poi_id, type, day?, time?} with
+    type ∈ exclude | include | day | pin — pass them to re-optimize around fixed
+    choices. Returns days→stops (with arrival/departure times) plus dropped POIs;
+    check `feasible`/`reason` for infeasible locks."""
+    lock_objs = [Lock(**lk) for lk in (locks or [])]
+    try:
+        with SessionLocal() as db:
+            if base_lat is None or base_lon is None:   # default to the city's base
+                c = store.get_city(city, db)
+                if c:
+                    base_lat = c.base_lat if base_lat is None else base_lat
+                    base_lon = c.base_lon if base_lon is None else base_lon
+            return main._run(city, db, days, start, end, base_lat, base_lon,
+                             balance, 3, profile, lock_objs)
+    except Exception as exc:  # routing engine unreachable, bad lock, etc.
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def save_trip(title: str, days: int = 2, start: str = "09:00", end: str = "19:00",
+              balance: int = 5, profile: str = "foot", locks: list[dict] | None = None,
+              start_date: str | None = None, notes: str | None = None,
+              city: str = CITY) -> dict:
+    """Solve and SAVE a named trip over `city`'s library so the user can review it
+    later. `start_date` (YYYY-MM-DD) anchors day 1 on the calendar. The server
+    solves with the same engine as plan_trip and persists the itinerary; returns
+    the saved trip (with its `id`). Fails without saving if the solve is infeasible."""
+    try:
+        with SessionLocal() as db:
+            req = main.TripCreate(city=city, title=title, days=days, start=start, end=end,
+                                  balance=balance, profile=profile, locks=locks or [],
+                                  start_date=start_date, notes=notes)
+            return main.create_trip(req, db)
+    except Exception as exc:  # infeasible solve (422), engine down, bad lock, …
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def list_trips(city: str = CITY) -> list[dict]:
+    """List `city`'s saved trips (id, title, status, start_date, days, stop count)."""
+    with SessionLocal() as db:
+        trips = store.list_trips(city, db)
+        counts = store.trip_stop_counts(db, [t.id for t in trips])
+        return [main._trip_summary(t, counts.get(t.id, 0)) for t in trips]
+
+
+@mcp.tool()
+def get_trip(trip_id: int) -> dict:
+    """Retrieve a complete saved trip: per-day dated stops in visit order with
+    arrival/departure times, plus dropped POIs and the locks it was solved with."""
+    with SessionLocal() as db:
+        t = store.get_trip(trip_id, db)
+        if t is None:
+            return {"error": f"No trip {trip_id}"}
+        return main._trip_out(t, store.trip_stops(trip_id, db))
+
+
+if __name__ == "__main__":
+    mcp.run()

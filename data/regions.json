@@ -1,0 +1,26 @@
+{
+  "northeast": {
+    "label": "US Northeast",
+    "port": 8101,
+    "pbf_url": "https://download.geofabrik.de/north-america/us-northeast-latest.osm.pbf",
+    "gtfs": [{ "name": "mbta", "url": "https://cdn.mbta.com/MBTA_GTFS.zip", "route_types": [0, 1] }]
+  },
+  "midwest": {
+    "label": "US Midwest",
+    "port": 8102,
+    "pbf_url": "https://download.geofabrik.de/north-america/us-midwest-latest.osm.pbf",
+    "gtfs": []
+  },
+  "south": {
+    "label": "US South",
+    "port": 8103,
+    "pbf_url": "https://download.geofabrik.de/north-america/us-south-latest.osm.pbf",
+    "gtfs": []
+  },
+  "west": {
+    "label": "US West",
+    "port": 8104,
+    "pbf_url": "https://download.geofabrik.de/north-america/us-west-latest.osm.pbf",
+    "gtfs": [{ "name": "rtd", "url": "https://www.rtd-denver.com/files/gtfs/google_transit.zip" }]
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "kinkaku-ji": {
+    "name": "Kinkaku-ji (Golden Pavilion)",
+    "lat": 35.0394,
+    "lon": 135.7292,
+    "dwell_min": 60,
+    "importance": 0.9,
+    "hours": { "default": { "open": "09:00", "close": "17:00" } },
+    "tags": ["temple", "iconic", "winter-snow"],
+    "notes": "Stunning with a dusting of snow — worth a winter return.",
+    "status": "idea"
+  },
+  "fushimi-inari": {
+    "name": "Fushimi Inari Taisha",
+    "lat": 34.9671,
+    "lon": 135.7727,
+    "dwell_min": 120,
+    "importance": 1.0,
+    "hours": { "default": { "open": "00:00", "close": "23:59" } },
+    "tags": ["shrine", "hike", "early-morning", "all-day"],
+    "notes": "Go at dawn to beat crowds; the torii gate trail is open 24h.",
+    "status": "visited"
+  },
+  "kiyomizu-dera": {
+    "name": "Kiyomizu-dera",
+    "lat": 34.9949,
+    "lon": 135.7850,
+    "dwell_min": 90,
+    "importance": 0.85,
+    "hours": { "default": { "open": "06:00", "close": "18:00" } },
+    "tags": ["temple", "iconic", "autumn-foliage"],
+    "notes": "Late-November maple foliage is spectacular — reason to plan an autumn trip.",
+    "status": "idea"
+  },
+  "arashiyama-bamboo": {
+    "name": "Arashiyama Bamboo Grove",
+    "lat": 35.0170,
+    "lon": 135.6716,
+    "dwell_min": 45,
+    "importance": 0.8,
+    "hours": { "default": { "open": "00:00", "close": "23:59" } },
+    "tags": ["nature", "iconic", "early-morning"],
+    "notes": "Best before 8am. Far west of the city — cluster with other Arashiyama stops.",
+    "status": "idea"
+  },
+  "nishiki-market": {
+    "name": "Nishiki Market",
+    "lat": 35.0050,
+    "lon": 135.7649,
+    "dwell_min": 60,
+    "importance": 0.6,
+    "hours": { "default": { "open": "10:00", "close": "18:00" } },
+    "tags": ["food", "market", "indoor", "rainy-day"],
+    "notes": "Covered arcade — a good rainy-day option.",
+    "status": "idea"
+  },
+  "gion": {
+    "name": "Gion District",
+    "lat": 35.0036,
+    "lon": 135.7752,
+    "dwell_min": 60,
+    "importance": 0.7,
+    "hours": { "default": { "open": "00:00", "close": "23:59" } },
+    "tags": ["historic", "evening", "walk"],
+    "notes": "Atmospheric after dark; chance of spotting geiko on the way to appointments.",
+    "status": "idea"
+  }
+}

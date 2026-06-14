@@ -1,0 +1,12 @@
+# Keep the api build context tiny — the regional tilesets (data/regions, ~10 GB) and
+# the kyoto extract are mounted into the engine containers at runtime, NOT baked in.
+.git
+.venv
+**/__pycache__
+**/*.pyc
+data/regions
+data/valhalla
+data/cities
+data/matrix_cache.json
+*.log
+node_modules
