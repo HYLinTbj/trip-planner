@@ -470,6 +470,7 @@ function applyCity(slug) {
   const c = cityMap[slug];
   if (!c) return;
   currentCity = slug;
+  $("city").value = slug;                       // keep the picker in sync on programmatic selects
   if (c.base) {
     $("blat").value = c.base.lat;
     $("blon").value = c.base.lon;
@@ -482,6 +483,8 @@ function applyCity(slug) {
     opt.textContent = c.has_transit ? `transit (${c.transit_operator || "transit"})` : "transit (n/a here)";
     if (!c.has_transit && val("profile") === "transit") $("profile").value = "foot";
   }
+  const rm = $("city-remove");
+  if (rm) rm.hidden = !c.user_created;          // ✕ only for the user's own places
 }
 
 // Switching city is just an API re-scope: reset edits, re-point, reload POIs, replan.
@@ -495,6 +498,90 @@ function selectCity(slug) {
   loadTrips();
   freshPlan();
 }
+
+// (Re)build the place picker from GET /cities — the user's own places grouped above the
+// curated catalog. Refreshes cityMap. Returns the slugs in server (label) order.
+async function loadCities(selectSlug) {
+  const sel = $("city");
+  let cities = [];
+  try { cities = (await (await fetch("/cities")).json()).cities || []; }
+  catch (e) { return []; }
+  Object.keys(cityMap).forEach((k) => delete cityMap[k]);
+  sel.innerHTML = "";
+  const group = (label, list) => {
+    if (!list.length) return;
+    const g = document.createElement("optgroup"); g.label = label;
+    list.forEach((c) => {
+      cityMap[c.slug] = c;
+      const o = document.createElement("option");
+      o.value = c.slug; o.textContent = c.label || c.slug;
+      g.appendChild(o);
+    });
+    sel.appendChild(g);
+  };
+  group("Your places", cities.filter((c) => c.user_created));
+  group("Catalog cities", cities.filter((c) => !c.user_created));
+  sel.onchange = () => selectCity(sel.value);
+  if (selectSlug && cityMap[selectSlug]) sel.value = selectSlug;
+  return cities.map((c) => c.slug);
+}
+
+// ===== Destination search: set ANY place as the trip base ====================
+// Geocode free text, then POST /cities to create (or reuse) a place — the server resolves
+// its US region from the coordinates. The new place is then scoped like any other city.
+let destTimer = null;
+$("dest").addEventListener("input", () => {
+  clearTimeout(destTimer);
+  const q = val("dest").trim();
+  if (q.length < 2) { $("dest-results").innerHTML = ""; return; }
+  destTimer = setTimeout(() => runDestSearch(q), 400);   // debounce — Nominatim is rate-limited
+});
+
+async function runDestSearch(q) {
+  let res;
+  try { res = await fetch(`/geocode?q=${encodeURIComponent(q)}`); }
+  catch (e) { return; }
+  if (!res.ok) { $("dest-results").innerHTML = `<div class="result muted">search failed</div>`; return; }
+  const hits = (await res.json()).results || [];
+  if (!hits.length) { $("dest-results").innerHTML = `<div class="result muted">no matches</div>`; return; }
+  $("dest-results").innerHTML = hits.map((h) =>
+    `<div class="result"><b>${esc(h.name)}</b><br><span class="muted">${esc(h.display_name)}</span></div>`
+  ).join("");
+  [...$("dest-results").children].forEach((el, i) => { el.onclick = () => createPlace(hits[i]); });
+}
+
+async function createPlace(hit) {
+  $("dest-results").innerHTML = ""; $("dest").value = "";
+  setStatus(`Setting base to “${hit.name}”…`);
+  let res;
+  try {
+    res = await fetch("/cities", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: hit.name, lat: hit.lat, lon: hit.lon }),
+    });
+  } catch (e) { setStatus("Network error — is the server running?", true); return; }
+  if (!res.ok) { setStatus(`⚠ ${await res.text()}`, true); return; }   // e.g. 422 outside coverage
+  const city = await res.json();
+  const prev = currentCity;
+  await loadCities(city.slug);          // refresh the picker + cache, select the new/reused place
+  if (city.slug !== prev) { currentCity = null; selectCity(city.slug); }  // re-scope to it
+  else { applyCity(city.slug); setStatus(`Already here: ${city.label || city.slug}.`); }
+}
+
+async function removePlace() {
+  const slug = currentCity, c = cityMap[slug];
+  if (!c || !c.user_created) return;
+  if (!confirm(`Remove “${c.label || slug}”? Its saved POIs and trips will be deleted.`)) return;
+  let res;
+  try { res = await fetch(`/cities/${encodeURIComponent(slug)}`, { method: "DELETE" }); }
+  catch (e) { setStatus("Network error while removing.", true); return; }
+  if (!res.ok) { setStatus(`Couldn't remove: ${await res.text()}`, true); return; }
+  const slugs = await loadCities();
+  currentCity = null;
+  if (slugs[0]) selectCity(slugs[0]);
+  setStatus("Place removed.");
+}
+$("city-remove").addEventListener("click", removePlace);
 
 // ===== Trips: save / browse / load / lifecycle =============================
 function renderTripHeader() {
@@ -609,24 +696,14 @@ $("trip-status").addEventListener("change", () => patchTrip({ status: $("trip-st
 $("trip-date").addEventListener("change", () => patchTrip({ start_date: $("trip-date").value || null }));
 $("trip-title").addEventListener("change", () => { if (currentTrip) patchTrip({ title: $("trip-title").value.trim() || currentTrip.title }); });
 
-// Bootstrap: load the city list into the picker, default to the served city, THEN plan.
+// Bootstrap: load the places into the picker, default to the served city, THEN plan.
 async function init() {
   let defaultCity = null;
   try { defaultCity = (await (await fetch("/config")).json()).default_city || null; } catch (e) {}
-  try {
-    const cities = (await (await fetch("/cities")).json()).cities || [];
-    const sel = $("city");
-    sel.innerHTML = "";
-    cities.forEach((c) => {
-      cityMap[c.slug] = c;
-      const o = document.createElement("option");
-      o.value = c.slug; o.textContent = c.label || c.slug;
-      sel.appendChild(o);
-    });
-    sel.onchange = () => selectCity(sel.value);
-    const start = (defaultCity && cityMap[defaultCity]) ? defaultCity : (cities[0] && cities[0].slug);
-    if (start) { sel.value = start; applyCity(start); }
-  } catch (e) { currentCity = defaultCity; /* no /cities → single-city fallback */ }
+  const slugs = await loadCities();
+  const start = (defaultCity && cityMap[defaultCity]) ? defaultCity : slugs[0];
+  if (start) applyCity(start);
+  else currentCity = defaultCity;        // no /cities → single-city fallback
   renderTripHeader();
   loadPois();
   loadTrips();

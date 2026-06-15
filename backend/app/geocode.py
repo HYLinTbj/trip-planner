@@ -41,20 +41,32 @@ def search(q: str, limit: int = 5, base_url: str = DEFAULT_NOMINATIM_URL) -> lis
     return [_norm(it) for it in resp.json()]
 
 
-def reverse(lat: float, lon: float, base_url: str = DEFAULT_NOMINATIM_URL) -> dict:
+def reverse(lat: float, lon: float, base_url: str = DEFAULT_NOMINATIM_URL,
+            detail: bool = False) -> dict:
     """Reverse geocode: a clicked point → a single named place.
 
     Falls back to the clicked coordinates with an empty name when Nominatim has
     nothing there (e.g. open water) so the add form can still proceed.
+
+    `detail=True` also requests structured address fields and returns them under
+    an `address` key (e.g. `ISO3166-2-lvl4` / `state`) — used by places.py to map
+    a base coordinate to its US region. The default stays lean for the add form.
     """
+    params = {"lat": lat, "lon": lon, "format": "jsonv2"}
+    if detail:
+        params["addressdetails"] = 1
     resp = httpx.get(
         f"{base_url}/reverse",
-        params={"lat": lat, "lon": lon, "format": "jsonv2"},
+        params=params,
         headers={"User-Agent": USER_AGENT},
         timeout=10.0,
     )
     resp.raise_for_status()
     data = resp.json()
     if "error" in data:
-        return {"name": "", "display_name": "", "lat": lat, "lon": lon}
-    return _norm(data)
+        return {"name": "", "display_name": "", "lat": lat, "lon": lon,
+                **({"address": {}} if detail else {})}
+    out = _norm(data)
+    if detail:
+        out["address"] = data.get("address", {})
+    return out

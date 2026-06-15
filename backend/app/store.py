@@ -7,6 +7,7 @@ slug and a SQLAlchemy `Session` (FastAPI's `Depends(get_session)`, or
 `SessionLocal()` outside a request).
 """
 
+import math
 import re
 
 from sqlalchemy import delete, func, select
@@ -80,6 +81,52 @@ def list_cities(db: Session) -> list[m.City]:
 
 def get_city(city: str, db: Session) -> m.City | None:
     return db.get(m.City, city)
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi, dlmb = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+def add_city(name: str, base_lat: float, base_lon: float, region: str | None,
+             db: Session, *, base_name: str | None = None,
+             has_transit: bool = False) -> m.City:
+    """Create (or reuse) a lightweight place from a free-base search — the structural
+    parent a POI library / trips hang off (FK to cities.slug). Re-searching the same
+    spot is idempotent: if a city already holds this slug within ~1 km of the base, it
+    is reused (returning a catalog city when you land back on one); a slug taken by a
+    *different* place gets a -2/-3 suffix (like _unique_id for POIs)."""
+    slug = _slugify(name)
+    existing = db.get(m.City, slug)
+    if existing is not None and _haversine_km(
+            existing.base_lat, existing.base_lon, base_lat, base_lon) <= 1.0:
+        return existing
+    if existing is not None:                     # same name, different place -> new slug
+        all_slugs = set(db.scalars(select(m.City.slug)).all())
+        slug = _unique_id(name, all_slugs)
+    city = m.City(
+        slug=slug, label=name, base_lat=base_lat, base_lon=base_lon,
+        base_name=base_name or name, region=region,
+        has_transit=has_transit, user_created=True,
+    )
+    db.add(city)
+    db.commit()
+    db.refresh(city)
+    return city
+
+
+def delete_city(slug: str, db: Session) -> bool:
+    """Remove a place by slug; its POIs/trips (and their stops) cascade via the FK
+    ondelete=CASCADE. Returns whether it existed. (Caller guards catalog cities.)"""
+    city = db.get(m.City, slug)
+    if city is None:
+        return False
+    db.delete(city)
+    db.commit()
+    return True
 
 
 # --- Trips (saved itineraries: normalized stops + raw result snapshot) -------

@@ -11,10 +11,19 @@
   <div id="app">
     <aside id="side">
       <div class="topbar">
-        <h1>Trip Planner</h1>
-        <label class="city-pick">City
-          <select id="city"></select>
-        </label>
+        <div class="topbar-head">
+          <h1>Trip Planner</h1>
+          <label class="city-pick">Your places
+            <span class="city-row">
+              <select id="city"></select>
+              <button id="city-remove" class="city-x" type="button" title="Remove this place" hidden>✕</button>
+            </span>
+          </label>
+        </div>
+        <div class="dest search">
+          <input id="dest" placeholder="📍 Where to? Search a city or address to set your base…" autocomplete="off" />
+          <div id="dest-results" class="results"></div>
+        </div>
       </div>
 
       <!-- Current trip: name / status / date / save -->

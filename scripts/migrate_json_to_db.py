@@ -42,6 +42,7 @@ def main() -> None:
                 transit_operator=(gtfs[0]["name"] if gtfs else None),
                 default_depart=c.get("depart"),
                 region=REGION.get(slug),
+                user_created=False,            # curated catalog (protected from delete)
             ))
             n_cities += 1
 

@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from . import store
+from . import places, store
 from .candidates import ground
 from .db import get_session
 from .engine import DEFAULT_PROFILE, base_url as engine_base_url, table_durations, to_minutes
@@ -57,16 +57,60 @@ def config() -> dict:
             "city": CITY_LABEL, "default_city": DEFAULT_CITY}
 
 
+def _city_out(c) -> dict:
+    """A city/place as the picker consumes it (base + transit + region/origin flags)."""
+    return {
+        "slug": c.slug, "label": c.label,
+        "base": {"lat": c.base_lat, "lon": c.base_lon, "name": c.base_name},
+        "has_transit": c.has_transit, "transit_operator": c.transit_operator,
+        "default_depart": c.default_depart,
+        "region": c.region, "user_created": c.user_created,
+    }
+
+
 @app.get("/cities")
 def cities(db: Session = Depends(get_session)) -> dict:
-    """The city registry — what the phase-3 picker lists."""
-    return {"cities": [
-        {"slug": c.slug, "label": c.label,
-         "base": {"lat": c.base_lat, "lon": c.base_lon, "name": c.base_name},
-         "has_transit": c.has_transit, "transit_operator": c.transit_operator,
-         "default_depart": c.default_depart}
-        for c in store.list_cities(db)
-    ]}
+    """The place registry the picker lists — curated catalog cities plus the user's
+    own free-base places (user_created)."""
+    return {"cities": [_city_out(c) for c in store.list_cities(db)]}
+
+
+class PlaceCreate(BaseModel):
+    """A geocoded place (from /geocode) to set as a trip base."""
+    name: str
+    lat: float
+    lon: float
+
+
+@app.post("/cities", status_code=201)
+def create_city(body: PlaceCreate, db: Session = Depends(get_session)) -> dict:
+    """Set any place as a trip base: resolve its US region from the coordinates, then
+    create (or reuse) a lightweight place with its own POI library + trips. 422 when
+    the point isn't in supported US coverage (the engines cover the contiguous US)."""
+    try:
+        region = places.region_for_point(body.lat, body.lon)
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Geocoder unreachable: {exc}") from exc
+    if region is None:
+        raise HTTPException(
+            status_code=422,
+            detail=("Outside supported coverage — routing covers the contiguous US "
+                    "only (Alaska, Hawaii, and non-US places aren't routable yet)."),
+        )
+    return _city_out(store.add_city(body.name, body.lat, body.lon, region, db))
+
+
+@app.delete("/cities/{slug}")
+def remove_city(slug: str, db: Session = Depends(get_session)) -> dict:
+    """Delete a user-created place (its POIs/trips cascade). Catalog cities are
+    protected so the seed registry can't be deleted from the UI."""
+    c = store.get_city(slug, db)
+    if c is None:
+        raise HTTPException(status_code=404, detail=f"Unknown place '{slug}'")
+    if not c.user_created:
+        raise HTTPException(status_code=403, detail=f"'{slug}' is a catalog city — not removable")
+    store.delete_city(slug, db)
+    return {"ok": True, "deleted": slug}
 
 
 def _engine_url(city: str, db: Session) -> str:

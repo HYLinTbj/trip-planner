@@ -8,7 +8,7 @@ there is no users table — a later user_id FK is purely additive.
 
 from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
 
@@ -30,6 +30,11 @@ class City(Base):
     default_depart: Mapped[str | None] = mapped_column(String, nullable=True)
     # Which regional engine serves this city (phase 2). Keys into data/regions.json.
     region: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # True for a place auto-created from a free-base search (vs the curated catalog).
+    # Lets the UI group "your places" and guards catalog cities from deletion.
+    user_created: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
 
 
 class POI(Base):

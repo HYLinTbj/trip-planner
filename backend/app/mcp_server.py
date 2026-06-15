@@ -12,7 +12,7 @@ Run over stdio:   python -m app.mcp_server      (from the backend/ directory)
 
 from mcp.server.fastmcp import FastMCP
 
-from . import geocode, main, store
+from . import geocode, main, places, store
 from .db import SessionLocal
 from .models import Lock, POICreate
 
@@ -32,6 +32,46 @@ def search_places(query: str, limit: int = 5) -> list[dict]:
     coordinates yourself. Returns up to `limit` candidates: {name, display_name,
     lat, lon}."""
     return geocode.search(query, limit=limit)
+
+
+@mcp.tool()
+def list_places() -> list[dict]:
+    """List every place you can plan in (slug, label, base, region, user_created) —
+    curated catalog cities plus bases you've created with create_place. Pass a slug as
+    the `city` argument to the other tools."""
+    with SessionLocal() as db:
+        return [main._city_out(c) for c in store.list_cities(db)]
+
+
+@mcp.tool()
+def create_place(name: str | None = None, lat: float | None = None,
+                 lon: float | None = None, query: str | None = None) -> dict:
+    """Set any place as a trip base so you can plan there. GROUND it first — pass
+    `lat`/`lon` from `search_places`, OR pass a `query` and this tool geocodes it
+    (never invent coordinates). Resolves the place's US region and creates (or reuses)
+    a place with its own POI library; returns {slug, label, base, region}. Then call
+    add_poi(city=slug) and plan_trip(city=slug). Errors if the place is outside the
+    contiguous-US coverage (Alaska, Hawaii, and non-US aren't routable yet)."""
+    try:
+        if lat is None or lon is None:
+            if not query:
+                return {"error": "Provide lat/lon (from search_places) or a query to geocode."}
+            hits = geocode.search(query, limit=1)
+            if not hits:
+                return {"error": f"Couldn't geocode {query!r}."}
+            name, lat, lon = name or hits[0]["name"], hits[0]["lat"], hits[0]["lon"]
+        if not name:
+            return {"error": "A place name is required."}
+        region = places.region_for_point(lat, lon)
+        if region is None:
+            return {"error": "Outside supported coverage — contiguous US only "
+                             "(Alaska, Hawaii, and non-US aren't routable yet)."}
+        with SessionLocal() as db:
+            c = store.add_city(name, lat, lon, region, db)
+            return {"slug": c.slug, "label": c.label, "region": c.region,
+                    "base": {"lat": c.base_lat, "lon": c.base_lon, "name": c.base_name}}
+    except Exception as exc:   # geocoder/engine unreachable, etc.
+        return {"error": str(exc)}
 
 
 @mcp.tool()
