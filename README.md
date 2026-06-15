@@ -25,6 +25,7 @@ trip-planner/
 │   ├── candidates.py llm.py geocode.py   # LLM-proposes-names → geocode-grounds pipeline
 │   ├── main.py                # FastAPI: REST API + serves the frontend
 │   └── mcp_server.py          # the same grounded tools over MCP
+├── backend/tests/            # pytest unit suite (pure logic; no DB/engine/network)
 ├── alembic/                   # database migrations
 ├── frontend/                  # vanilla JS + Leaflet map UI (no build step)
 └── scripts/                   # build engines, onboard cities, serve, seed the DB
@@ -223,6 +224,27 @@ Desktop's `claude_desktop_config.json`:
 Then ask your agent to *"find three quiet temples in Kyoto, add them, and plan a
 2-day walking trip"* — it grounds each via `search_places`, stores them, and gets a
 real schedule back.
+
+## Tests
+
+A pure-unit `pytest` suite lives in `backend/tests/` — covering the solver (TOPTW + the
+four lock types + graceful infeasibility), the travel-time matrix cache key + unreachable-arc
+repair, the grounding pipeline, LLM-output parsing, and US-region resolution. It needs **no
+Postgres, routing engine, or network** (every I/O seam is monkeypatched), so it runs in
+seconds:
+
+```bash
+pip install -r backend/requirements-dev.txt
+pytest                                   # from the repo root (config in pyproject.toml)
+```
+
+It gates the build two ways:
+
+- **Docker:** `docker build -f backend/Dockerfile --target test .` runs the suite during an
+  image build and fails on any test failure. The default build (`docker compose up -d --build
+  api`) skips it — `runtime` is a separate, lean stage with no pytest.
+- **Git pre-push hook:** run `bash scripts/install-hooks.sh` once per clone to point git at
+  `scripts/git-hooks`; the `pre-push` hook then runs `pytest` and aborts a push if it fails.
 
 ## Roadmap
 

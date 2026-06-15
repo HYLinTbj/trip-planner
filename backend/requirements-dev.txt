@@ -1,0 +1,3 @@
+# Test-only deps, kept out of requirements.txt so the runtime image stays lean.
+# Installed by the Docker `test` build stage and for local dev.
+pytest>=8

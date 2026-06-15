@@ -79,10 +79,20 @@ alembic revision --autogenerate -m "msg"   # env.py reads metadata from app.mode
 alembic upgrade head
 ```
 
-There is **no test suite and no linter configured**. The closest thing to tests are the
-two smoke scripts above.
+There is a **pure-unit `pytest` suite** (`backend/tests/`; dev deps in
+`backend/requirements-dev.txt`) and **no linter configured**. The unit tests need no
+Postgres / routing engine / network — every I/O seam is monkeypatched — and cover the
+solver (TTDP + the four lock types + graceful infeasibility), the matrix cache key +
+unreachable-arc repair, grounding, LLM-output parsing, and US-region resolution. The two
+smoke scripts above remain the only thing exercising a *live* routing engine.
 
-### Iterating + checking (no build step, no linter, no test suite)
+### Iterating + checking (no build step, no linter)
+- Run the unit tests: `pytest` (or `.venv/bin/pytest`) from the repo root (config in
+  `pyproject.toml`). They gate two ways: the Docker `test` stage
+  (`docker build -f backend/Dockerfile --target test .`) and a local **pre-push** hook
+  (install once per clone: `bash scripts/install-hooks.sh`). The default image build /
+  `docker compose up -d --build api` does **not** run them — `runtime` is a separate lean
+  stage with no pytest.
 - Frontend edits are **live** (compose bind-mounts `frontend/` read-only). **Backend
   changes need `docker compose up -d --build api`** — which re-runs `alembic upgrade head`
   and **wipes the in-container `data/matrix_cache.json`** (it's `.dockerignore`d, not

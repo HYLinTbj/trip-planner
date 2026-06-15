@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Pre-push gate: run the unit suite before anything leaves the machine; a failing test
+# aborts the push. Prefers the project's venv pytest, falls back to pytest on PATH.
+# Install once per clone with:  bash scripts/install-hooks.sh
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+if [ -x .venv/bin/pytest ]; then
+  pytest=.venv/bin/pytest
+elif command -v pytest >/dev/null 2>&1; then
+  pytest=pytest
+else
+  echo "pre-push: pytest not found — run: pip install -r backend/requirements-dev.txt" >&2
+  exit 1
+fi
+
+echo "pre-push: running unit tests…"
+exec "$pytest" -q

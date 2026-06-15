@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# `import app.solver` resolves against backend/ (matches the repo's documented
+# `PYTHONPATH=backend` quick-check convention); this config does NOT package the repo.
+pythonpath = ["backend"]
+testpaths = ["backend/tests"]
+addopts = "-q"
