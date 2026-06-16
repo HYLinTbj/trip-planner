@@ -261,3 +261,9 @@ It gates the build two ways:
 trips, scoped by city slug), a **multi-city catalog** with an onboarding pipeline
 (`data/cities.json`), and **regional Valhalla engines** per US census region
 (`data/regions.json`) — all composable on one host (`docker compose up`).
+
+**Beyond a single base (in progress):** any place can be a trip base — geocode-and-set, no
+preset city list (HYL-67) — and a trip can have **per-day start/end anchors** so a road trip
+moves town to town instead of orbiting one hotel (HYL-68). The solver picks the best POIs for
+each day's leg; drive it via `POST /plan-route` or the `plan_route` MCP tool (within one US
+region for now — cross-region routing awaits a national engine). Map UI for anchors is next.

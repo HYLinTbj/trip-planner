@@ -120,20 +120,26 @@ this path, preserve it — don't let model output become a source of truth.
   SQLAlchemy). Every other module passes a `city` slug + a `Session` (FastAPI
   `Depends(get_session)`, or `SessionLocal()` outside a request). Pydantic API models
   live in `models.py`; ORM models in `models_db.py`.
-- **`main._run()`** is the shared "solve + shape for the map" helper behind `/plan`,
-  `/replan`, and trip create/update/reoptimize. Changes to response shape go here.
+- **`main._solve()`** is the shared "solve + shape for the map" core; `_run` (base mode —
+  one hotel) and `_run_route` (HYL-68 route mode — per-day start/end anchors) wrap it, behind
+  `/plan`, `/replan`, `/plan-route`, and trip create/update/reoptimize. Changes to response
+  shape go here. A route whose anchors/POIs cross regions is rejected via
+  `places.region_for_points` (one regional engine can't route across regions yet).
 
 ### Solver (`solver.py`)
-OR-Tools Tourist Trip Design Problem. Days are vehicles starting/ending at the base
-(hotel); opening hours → time windows, dwell → service time, importance → drop-penalty
-(so low-value POIs are shed when a day can't hold everything), `balance` → a count
-dimension that evens stops across days. User edits are **locks** turned into hard
-constraints: `exclude` (drop), `include` (must-visit, any day), `day` (must be on day N),
-`pin` (fixed arrival time). Infeasible locks return a graceful `feasible:false` reason
-rather than throwing.
+OR-Tools Tourist Trip Design Problem. Days are vehicles; each day has its **own start and
+end anchor** (HYL-68) — `plan_trip(pois, matrix, day_anchors, …)` where `day_anchors` is a
+`(start_node, end_node)` index pair per day (a single base is the special case where every
+anchor shares the base's coords). Matrix layout: anchor/depot nodes `0..A-1`, then POIs;
+co-located anchors are kept as distinct nodes (OR-Tools requires unique start/end indices).
+Opening hours → time windows, dwell → service time, importance → drop-penalty (so low-value
+POIs are shed when a day can't hold everything), `balance` → a count dimension that evens
+stops across days. User edits are **locks** turned into hard constraints: `exclude` (drop),
+`include` (must-visit, any day), `day` (must be on day N), `pin` (fixed arrival time).
+Infeasible locks return a graceful `feasible:false` reason rather than throwing.
 
 ### Travel-time matrix (`matrix.py`)
-Builds the integer-minute `(N+1)x(N+1)` matrix the solver consumes (index 0 = base).
+Builds the integer-minute matrix the solver consumes (anchor/depot nodes first, then POIs).
 Cached on disk at `data/matrix_cache.json`, keyed by `sha1(coords + profile + base_url)`
 so a different region/engine can't collide. For symmetric modes (foot/bicycle) a
 one-directional unreachable arc is mirrored from its reverse so one bad OSM edge doesn't
