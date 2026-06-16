@@ -155,6 +155,71 @@ def plan_route(day_anchors: list[dict], poi_refs: list[dict] | None = None,
 
 
 @mcp.tool()
+def save_route_trip(title: str, day_anchors: list[dict], poi_refs: list[dict] | None = None,
+                    start: str = "09:00", end: str = "19:00", balance: int = 5,
+                    profile: str = "car", locks: list[dict] | None = None,
+                    start_date: str | None = None, notes: str | None = None,
+                    city: str = CITY) -> dict:
+    """Solve and SAVE a road trip (HYL-68): per-day start/end `day_anchors` over a (city,id)
+    `poi_refs` pool — like plan_route but persisted. Returns the saved trip (with its id).
+    Fails without saving if infeasible or the route crosses regions."""
+    try:
+        req = main.TripCreate(
+            city=city, title=title, mode="route",
+            day_anchors=[main.DayAnchor(**a) for a in day_anchors],
+            poi_refs=[main.POIRef(**r) for r in (poi_refs or [])],
+            start=start, end=end, balance=balance, profile=profile,
+            locks=[Lock(**lk) for lk in (locks or [])], start_date=start_date, notes=notes,
+        )
+        with SessionLocal() as db:
+            return main.create_trip(req, db)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def add_trip_poi(trip_id: int, poi_id: str, city: str = CITY) -> dict:
+    """Add one library POI to a saved trip's candidate pool (idempotent). Call
+    reoptimize_trip afterwards to fold it into the route."""
+    try:
+        with SessionLocal() as db:
+            if store.get_trip(trip_id, db) is None:
+                return {"error": f"No trip {trip_id}"}
+            store.add_trip_poi(trip_id, city, poi_id, db)
+            db.commit()
+            return {"trip_id": trip_id, "added": {"city": city, "id": poi_id}}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def set_trip_pois(trip_id: int, poi_refs: list[dict]) -> dict:
+    """Replace a saved trip's whole candidate pool with these {city, id} refs. Call
+    reoptimize_trip afterwards to re-solve around the new pool."""
+    try:
+        with SessionLocal() as db:
+            if store.get_trip(trip_id, db) is None:
+                return {"error": f"No trip {trip_id}"}
+            store.set_trip_pois(trip_id, [(r["city"], r["id"]) for r in poi_refs], db)
+            db.commit()
+            return {"trip_id": trip_id, "pool_size": len(poi_refs)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def reoptimize_trip(trip_id: int) -> dict:
+    """Re-solve a saved trip from its stored parameters + locks (route trips re-use their
+    anchors + pool) and replace its itinerary. Use after add_trip_poi / set_trip_pois, or
+    when the POI library changed."""
+    try:
+        with SessionLocal() as db:
+            return main.reoptimize_trip(trip_id, db=db)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
 def save_trip(title: str, days: int = 2, start: str = "09:00", end: str = "19:00",
               balance: int = 5, profile: str = "foot", locks: list[dict] | None = None,
               start_date: str | None = None, notes: str | None = None,

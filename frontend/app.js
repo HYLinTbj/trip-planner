@@ -68,20 +68,24 @@ function wpIcon(label) {   // a route anchor (overnight / start / end)
 // --- solving (only the initial load, "Plan (fresh)", and "Re-optimize" call this) ---
 // Base mode -> POST /replan (one hotel). Route mode (HYL-68) -> POST /plan-route with
 // per-day (start,end) anchors from the waypoint chain + this place's POI library as the pool.
+function waypointAnchors() {   // the waypoint chain -> per-day (start, end) anchors
+  const out = [];
+  for (let i = 0; i < waypoints.length - 1; i++) {
+    const a = waypoints[i], b = waypoints[i + 1];
+    out.push({ start_lat: a.lat, start_lon: a.lon, start_name: a.name,
+               end_lat: b.lat, end_lon: b.lon, end_name: b.name });
+  }
+  return out;
+}
+const tripPoiRefs = () => allPois.map((p) => ({ city: currentCity, id: p.id }));
+
 function planRequest(useLocks) {
   const common = {
     start: val("start"), end: val("end"), balance: +val("balance"),
     profile: val("profile"), time_limit: 1, locks: useLocks ? Object.values(locks) : [],
   };
   if (routeMode) {
-    const day_anchors = [];
-    for (let i = 0; i < waypoints.length - 1; i++) {
-      const a = waypoints[i], b = waypoints[i + 1];
-      day_anchors.push({ start_lat: a.lat, start_lon: a.lon, start_name: a.name,
-                         end_lat: b.lat, end_lon: b.lon, end_name: b.name });
-    }
-    const poi_refs = allPois.map((p) => ({ city: currentCity, id: p.id }));
-    return { url: "/plan-route", body: { ...common, day_anchors, poi_refs } };
+    return { url: "/plan-route", body: { ...common, day_anchors: waypointAnchors(), poi_refs: tripPoiRefs() } };
   }
   return { url: "/replan", body: {
     ...common, city: currentCity, days: +val("days"),
@@ -642,8 +646,6 @@ function setRouteMode(on) {
   routeMode = on;
   $("route-panel").hidden = !on;
   document.querySelectorAll(".base-field").forEach((el) => { el.style.display = on ? "none" : ""; });
-  $("trip-save").disabled = on;   // saving route trips is a later increment (Stage 4b)
-  $("trip-save").title = on ? "Saving road trips is coming soon" : "";
   if (on && !waypoints.length) {  // seed the first anchor from the current base/place
     const c = cityMap[currentCity];
     const name = (c && c.base && c.base.name) || (c && c.label) || "Start";
@@ -722,7 +724,7 @@ async function loadTrips() {
   box.innerHTML = trips.map((t) => `
     <div class="trip-row ${currentTrip && currentTrip.id === t.id ? "active" : ""}">
       <div class="trip-row-main"><b>${esc(t.title)}</b><span class="chip ${esc(t.status)}">${esc(t.status)}</span></div>
-      <div class="trip-row-sub muted">${t.start_date ? esc(t.start_date) + " · " : ""}${t.num_days}d · ${esc(t.profile)} · ${t.stops} stops</div>
+      <div class="trip-row-sub muted">${t.start_date ? esc(t.start_date) + " · " : ""}${t.mode === "route" ? "🚗 " : ""}${t.num_days}d · ${esc(t.profile)} · ${t.stops} stops</div>
       <div class="row">
         <button onclick="loadTrip(${t.id})">Load</button>
         <button class="danger" onclick="deleteTrip(${t.id})">Delete</button>
@@ -731,16 +733,25 @@ async function loadTrips() {
 }
 
 function tripBody(title) {
-  return {
+  const body = {
     city: currentCity, title,
     status: $("trip-status").value || "draft",
     notes: (currentTrip && currentTrip.notes) || null,   // preserve notes across an in-place Save
     start_date: $("trip-date").value || null,
-    days: +val("days"), start: val("start"), end: val("end"),
-    base_lat: +val("blat"), base_lon: +val("blon"),
+    start: val("start"), end: val("end"),
     balance: +val("balance"), profile: val("profile"),
     locks: Object.values(locks), result: lastPlan,   // persist exactly what's shown
   };
+  if (routeMode) {
+    body.mode = "route";
+    body.day_anchors = waypointAnchors();
+    body.poi_refs = tripPoiRefs();
+  } else {
+    body.mode = "base";
+    body.days = +val("days");
+    body.base_lat = +val("blat"); body.base_lon = +val("blon");
+  }
+  return body;
 }
 
 async function saveCurrent(forceNew) {
@@ -772,10 +783,23 @@ window.loadTrip = async (id) => {
     t = await res.json();
   } catch (e) { setStatus("Network error while loading.", true); setBusy(false); return; }
   setBusy(false);
-  $("days").value = t.num_days;
   $("start").value = t.day_start; $("end").value = t.day_end;
-  $("blat").value = t.base.lat; $("blon").value = t.base.lon;
   $("profile").value = t.profile; $("balance").value = t.balance;
+  if (t.mode === "route") {     // rebuild the route UI + waypoint chain from the saved anchors
+    routeMode = true; $("routemode").checked = true; $("route-panel").hidden = false;
+    document.querySelectorAll(".base-field").forEach((el) => { el.style.display = "none"; });
+    waypoints = [];
+    if (t.days.length && t.days[0].start) {
+      waypoints.push({ name: t.days[0].start.name, lat: t.days[0].start.lat, lon: t.days[0].start.lon });
+      t.days.forEach((d) => { if (d.end) waypoints.push({ name: d.end.name, lat: d.end.lat, lon: d.end.lon }); });
+    }
+    renderWaypoints();
+  } else {
+    routeMode = false; $("routemode").checked = false; $("route-panel").hidden = true;
+    document.querySelectorAll(".base-field").forEach((el) => { el.style.display = ""; });
+    $("days").value = t.num_days;
+    $("blat").value = t.base.lat; $("blon").value = t.base.lon;
+  }
   locks = {}; (t.locks || []).forEach((l) => { locks[l.poi_id] = l; });
   touched.clear();
   currentTrip = { id: t.id, title: t.title, status: t.status, start_date: t.start_date, notes: t.notes };

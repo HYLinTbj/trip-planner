@@ -158,10 +158,13 @@ A solved itinerary can be saved as a **trip**: metadata (title, status, `start_d
 solve params + locks + the raw `_run` result, with each visit normalized into a
 `trip_stops` row (composite PK `(trip_id, day_index, seq)`). Stops **snapshot**
 name/lat/lon and keep `poi_id` as a *soft* reference (no FK), so a trip still renders
-after a library POI is edited or deleted. API: `POST/GET/PUT/PATCH/DELETE /trips` +
-`POST /trips/{id}/reoptimize` (all solve/shape through `_run`); MCP adds
-`save_trip`/`list_trips`/`get_trip`. The frontend "Saved trips" panel loads a trip back
-into the live planner (restoring its controls + locks).
+after a library POI is edited or deleted. A **route trip** (HYL-68, `mode="route"`) also
+persists its per-day anchors (`trip_day_anchors`) + candidate pool (`trip_pois`, soft
+`(city_slug, poi_id)` refs spanning towns) and solves through `_run_route`; a base trip
+keeps its single `base_*` and solves through `_run`. API: `POST/GET/PUT/PATCH/DELETE /trips`
++ `POST /trips/{id}/reoptimize`; MCP adds `save_trip`/`save_route_trip`/`list_trips`/`get_trip`
+plus `add_trip_poi`/`set_trip_pois`/`reoptimize_trip`. The frontend "Saved trips" panel loads
+a trip back into the live planner (base or route — restoring controls, anchors, and locks).
 
 ### Frontend (`frontend/app.js`)
 Single-file vanilla JS + Leaflet, no build step (compose mounts it read-only for live

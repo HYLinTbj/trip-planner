@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from app import store
+from app import main, store
 from app.db import Base
 from app.models import POICreate
 
@@ -97,3 +97,71 @@ def test_haversine_and_unique_id():
     assert 30 < d < 45
     assert store._unique_id("Foo", set()) == "foo"
     assert store._unique_id("Foo", {"foo"}) == "foo-2"
+
+
+def test_add_trip_poi_idempotent(db):
+    store.add_city("Denver", 39.75, -104.99, "west", db)
+    pa = store.add_poi("denver", POICreate(name="Museum", lat=39.7, lon=-104.9), db)
+    trip = store.save_trip("denver", _route_meta(), [], {"days": []}, db,
+                           anchors=[{"start_lat": 39.75, "start_lon": -104.99, "start_name": None,
+                                     "end_lat": 39.8, "end_lon": -105.0, "end_name": None}])
+    store.add_trip_poi(trip.id, "denver", pa.id, db)
+    store.add_trip_poi(trip.id, "denver", pa.id, db)   # re-add is a no-op
+    db.commit()
+    assert {p.name for p in store.load_trip_pool(trip.id, db)} == {"Museum"}
+
+
+# --- main.create_trip / reoptimize_trip route branch (no engine; canned result) ----------
+
+def _seed_denver_boulder(db):
+    store.add_city("Denver", 39.75, -104.99, "west", db)
+    store.add_city("Boulder", 40.01, -105.27, "west", db)
+    store.add_poi("denver", POICreate(name="Museum", lat=39.7, lon=-104.9), db)
+
+
+_ANCHOR = {"start_lat": 39.75, "start_lon": -104.99, "start_name": "Denver",
+           "end_lat": 40.01, "end_lon": -105.27, "end_name": "Boulder"}
+_CANNED = {"feasible": True, "total_travel_min": 30, "dropped": [],
+           "days": [{"stops": [], "return_hhmm": "10:00", "travel_min": 30,
+                     "start": {"lat": 39.75, "lon": -104.99, "name": "Denver"},
+                     "end": {"lat": 40.01, "lon": -105.27, "name": "Boulder"}}]}
+
+
+def test_create_route_trip_persists(db):
+    _seed_denver_boulder(db)
+    req = main.TripCreate(
+        city="denver", title="RT", mode="route",
+        day_anchors=[main.DayAnchor(**_ANCHOR)],
+        poi_refs=[main.POIRef(city="denver", id="museum")],
+        result=_CANNED,   # supply the solve so no engine is needed
+    )
+    out = main.create_trip(req, db)
+    assert out["mode"] == "route" and "base" not in out
+    assert out["days"][0]["start"]["name"] == "Denver"
+    assert out["days"][0]["end"]["name"] == "Boulder"
+    assert len(store.load_day_anchors(out["id"], db)) == 1
+    assert {p.name for p in store.load_trip_pool(out["id"], db)} == {"Museum"}
+
+
+def test_reoptimize_route_resolves_from_stored_anchors_and_pool(db, monkeypatch):
+    _seed_denver_boulder(db)
+    req = main.TripCreate(city="denver", title="RT", mode="route",
+                          day_anchors=[main.DayAnchor(**_ANCHOR)],
+                          poi_refs=[main.POIRef(city="denver", id="museum")], result=_CANNED)
+    trip_id = main.create_trip(req, db)["id"]
+
+    captured = {}
+
+    def fake_run_route(pois, anchors, *a, **k):
+        captured["pois"] = sorted(p.name for p in pois)
+        captured["ndays"] = len(anchors)
+        return {"feasible": True, "total_travel_min": 1, "dropped": [],
+                "days": [{"stops": [], "return_hhmm": "10:00", "travel_min": 1,
+                          "start": {"lat": a[0][0], "lon": a[0][1], "name": a[0][2]},
+                          "end": {"lat": a[1][0], "lon": a[1][1], "name": a[1][2]}} for a in anchors]}
+
+    monkeypatch.setattr(main, "_run_route", fake_run_route)
+    out = main.reoptimize_trip(trip_id, db=db)
+    assert captured["pois"] == ["Museum"]   # re-solved from the stored pool
+    assert captured["ndays"] == 1           # and the stored anchors
+    assert out["total_travel_min"] == 1

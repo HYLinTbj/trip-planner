@@ -279,6 +279,12 @@ def set_trip_pois(trip_id: int, refs: list[tuple[str, str]], db: Session) -> Non
         db.add(m.TripPoi(trip_id=trip_id, city_slug=city_slug, poi_id=poi_id))
 
 
+def add_trip_poi(trip_id: int, city_slug: str, poi_id: str, db: Session) -> None:
+    """Add one POI to a trip's pool (idempotent — re-adding the same ref is a no-op)."""
+    if db.get(m.TripPoi, {"trip_id": trip_id, "city_slug": city_slug, "poi_id": poi_id}) is None:
+        db.add(m.TripPoi(trip_id=trip_id, city_slug=city_slug, poi_id=poi_id))
+
+
 def load_pois_by_refs(refs: list[tuple[str, str]], db: Session) -> list[POI]:
     """Fetch library POIs by their (city_slug, id) refs in one query (skips any missing) —
     the pool for a route trip spans multiple towns/places."""

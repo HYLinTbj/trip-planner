@@ -210,8 +210,11 @@ def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, pr
 def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks) -> dict:
     """Route-mode solve (HYL-68): per-day (start, end) anchors over a candidate `pois` pool.
     Rejects a trip whose anchors/POIs cross regions — one regional engine can't route it yet."""
-    pts = [(a[k][0], a[k][1]) for a in anchors for k in (0, 1)] + [(p.lat, p.lon) for p in pois]
-    region = places.region_for_points(pts)
+    # Region comes from the anchors (where the trip goes). We deliberately don't reverse-
+    # geocode every POI too (it'd be many Nominatim calls) — a POI outside the region simply
+    # routes as unreachable against the regional engine and gets dropped.
+    anchor_pts = [(a[k][0], a[k][1]) for a in anchors for k in (0, 1)]
+    region = places.region_for_points(anchor_pts)
     if region is None:
         raise HTTPException(
             status_code=422,
@@ -383,6 +386,9 @@ class TripCreate(BaseModel):
     time_limit: int = 3                # saved trips deserve a better solve than the UI's 1s
     locks: list[Lock] = []
     result: dict | None = None         # omit -> the server solves (authoritative)
+    mode: str = "base"                 # "base" | "route" (HYL-68)
+    day_anchors: list[DayAnchor] = []  # route mode: per-day (start, end) anchors
+    poi_refs: list[POIRef] = []        # route mode: the (city, id) candidate pool
 
 
 class TripPatch(BaseModel):
@@ -396,7 +402,7 @@ def _trip_summary(t, stop_count: int) -> dict:
     return {
         "id": t.id, "city": t.city_slug, "title": t.title, "status": t.status,
         "start_date": t.start_date.isoformat() if t.start_date else None,
-        "num_days": t.num_days, "profile": t.profile, "stops": stop_count,
+        "num_days": t.num_days, "profile": t.profile, "mode": t.mode, "stops": stop_count,
         "total_travel_min": t.total_travel_min, "feasible": t.feasible,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
@@ -411,6 +417,7 @@ def _trip_out(t, stops) -> dict:
     days = []
     for di in range(t.num_days):
         day_stops = [s for s in stops if s.day_index == di]   # already itinerary-ordered
+        rd = res_days[di] if di < len(res_days) else {}
         days.append({
             "day_index": di,
             "date": (t.start_date + timedelta(days=di)).isoformat() if t.start_date else None,
@@ -421,23 +428,55 @@ def _trip_out(t, stops) -> dict:
                 "arrival_hhmm": min_to_hhmm(s.arrival_min),
                 "departure_hhmm": min_to_hhmm(s.departure_min),
             } for s in day_stops],
-            "travel_min": res_days[di].get("travel_min") if di < len(res_days) else None,
-            "return_hhmm": res_days[di].get("return_hhmm") if di < len(res_days) else None,
+            "travel_min": rd.get("travel_min"),
+            "return_hhmm": rd.get("return_hhmm"),
+            "start": rd.get("start"),    # route trips: per-day anchors (None for base trips)
+            "end": rd.get("end"),
         })
-    return {
+    out = {
         **_trip_summary(t, sum(len(d["stops"]) for d in days)),
         "notes": t.notes,
         "day_start": min_to_hhmm(t.day_start_min), "day_end": min_to_hhmm(t.day_end_min),
         "balance": t.balance,
-        "base": {"lat": t.base_lat, "lon": t.base_lon},
         "days": days,
         "dropped": result.get("dropped", []),
         "locks": t.locks or [],
     }
+    if t.mode != "route":                # base trips expose a single base; route trips don't
+        out["base"] = {"lat": t.base_lat, "lon": t.base_lon}
+    return out
+
+
+def _route_solve_and_meta(req: "TripCreate", db: Session):
+    """Shared route-mode prep for create/update (HYL-68): load the (city, id) candidate pool,
+    build per-day anchors, solve unless a result is supplied, and assemble the column meta.
+    Returns (meta, result, anchor_dicts, poi_refs)."""
+    if not req.day_anchors:
+        raise HTTPException(status_code=422, detail="A route trip needs per-day anchors.")
+    pois = store.load_pois_by_refs([(r.city, r.id) for r in req.poi_refs], db)
+    anchors = [((a.start_lat, a.start_lon, a.start_name), (a.end_lat, a.end_lon, a.end_name))
+               for a in req.day_anchors]
+    result = req.result
+    if result is None:   # solve now — the server's plan is the source of truth
+        result = _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
+                            req.profile, req.locks)
+        if not result.get("feasible", True):
+            raise HTTPException(status_code=422,
+                                detail=f"Solve infeasible — nothing saved: {result.get('reason')}")
+    meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
+                num_days=len(req.day_anchors), day_start_min=hhmm_to_min(req.start),
+                day_end_min=hhmm_to_min(req.end), profile=req.profile, balance=req.balance,
+                mode="route", base_lat=None, base_lon=None)
+    return meta, result, [a.model_dump() for a in req.day_anchors], [(r.city, r.id) for r in req.poi_refs]
 
 
 @app.post("/trips", status_code=201)
 def create_trip(req: TripCreate, db: Session = Depends(get_session)) -> dict:
+    if req.mode == "route":
+        meta, result, anchors, poi_refs = _route_solve_and_meta(req, db)
+        trip = store.save_trip(req.city, meta, [lk.model_dump() for lk in req.locks], result, db,
+                               anchors=anchors, poi_refs=poi_refs)
+        return _trip_out(trip, store.trip_stops(trip.id, db))
     base_lat, base_lon = req.base_lat, req.base_lon
     if base_lat is None or base_lon is None:
         c = store.get_city(req.city, db)
@@ -455,7 +494,7 @@ def create_trip(req: TripCreate, db: Session = Depends(get_session)) -> dict:
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
                 num_days=req.days, day_start_min=hhmm_to_min(req.start),
                 day_end_min=hhmm_to_min(req.end), profile=req.profile, balance=req.balance,
-                base_lat=base_lat, base_lon=base_lon)
+                mode="base", base_lat=base_lat, base_lon=base_lon)
     trip = store.save_trip(req.city, meta, [lk.model_dump() for lk in req.locks], result, db)
     return _trip_out(trip, store.trip_stops(trip.id, db))
 
@@ -491,6 +530,11 @@ def update_trip(trip_id: int, req: TripCreate, db: Session = Depends(get_session
     t = store.get_trip(trip_id, db)
     if t is None:
         raise HTTPException(status_code=404, detail=f"No trip {trip_id}")
+    if req.mode == "route":
+        meta, result, anchors, poi_refs = _route_solve_and_meta(req, db)
+        store.update_trip(t, meta, [lk.model_dump() for lk in req.locks], result, db,
+                          anchors=anchors, poi_refs=poi_refs)
+        return _trip_out(t, store.trip_stops(trip_id, db))
     base_lat = t.base_lat if req.base_lat is None else req.base_lat
     base_lon = t.base_lon if req.base_lon is None else req.base_lon
     result = req.result
@@ -503,7 +547,7 @@ def update_trip(trip_id: int, req: TripCreate, db: Session = Depends(get_session
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
                 num_days=req.days, day_start_min=hhmm_to_min(req.start),
                 day_end_min=hhmm_to_min(req.end), profile=req.profile, balance=req.balance,
-                base_lat=base_lat, base_lon=base_lon)
+                mode="base", base_lat=base_lat, base_lon=base_lon)
     store.update_trip(t, meta, [lk.model_dump() for lk in req.locks], result, db)
     return _trip_out(t, store.trip_stops(trip_id, db))
 
@@ -517,9 +561,17 @@ def reoptimize_trip(trip_id: int, time_limit: int = 3,
     if t is None:
         raise HTTPException(status_code=404, detail=f"No trip {trip_id}")
     locks = [Lock(**lk) for lk in (t.locks or [])]
-    result = _run(t.city_slug, db, t.num_days, min_to_hhmm(t.day_start_min),
-                  min_to_hhmm(t.day_end_min), t.base_lat, t.base_lon,
-                  t.balance, time_limit, t.profile, locks)
+    if t.mode == "route":
+        rows = store.load_day_anchors(t.id, db)
+        anchors = [((r.start_lat, r.start_lon, r.start_name), (r.end_lat, r.end_lon, r.end_name))
+                   for r in rows]
+        result = _run_route(store.load_trip_pool(t.id, db), anchors,
+                            min_to_hhmm(t.day_start_min), min_to_hhmm(t.day_end_min),
+                            t.balance, time_limit, t.profile, locks)
+    else:
+        result = _run(t.city_slug, db, t.num_days, min_to_hhmm(t.day_start_min),
+                      min_to_hhmm(t.day_end_min), t.base_lat, t.base_lon,
+                      t.balance, time_limit, t.profile, locks)
     if not result.get("feasible", True):
         raise HTTPException(status_code=422,
                             detail=f"Re-solve infeasible — trip unchanged: {result.get('reason')}")
