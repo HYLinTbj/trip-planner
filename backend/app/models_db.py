@@ -81,8 +81,13 @@ class Trip(Base):
     day_end_min: Mapped[int] = mapped_column(Integer)
     profile: Mapped[str] = mapped_column(String)          # foot | car | bicycle | transit
     balance: Mapped[int] = mapped_column(Integer, default=0)
-    base_lat: Mapped[float] = mapped_column(Float)
-    base_lon: Mapped[float] = mapped_column(Float)
+    # HYL-68: "base" = one hotel (base_lat/lon set); "route" = per-day start/end anchors
+    # in trip_day_anchors (base_lat/lon NULL). Existing trips default to "base".
+    mode: Mapped[str] = mapped_column(
+        String, default="base", server_default=text("'base'"), nullable=False
+    )
+    base_lat: Mapped[float | None] = mapped_column(Float, nullable=True)
+    base_lon: Mapped[float | None] = mapped_column(Float, nullable=True)
     locks: Mapped[list] = mapped_column(JSON, default=list)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # raw _run output snapshot
     total_travel_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -123,3 +128,35 @@ class MatrixCache(Base):
     profile: Mapped[str | None] = mapped_column(String, nullable=True)
     matrix: Mapped[list] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TripDayAnchor(Base):
+    """HYL-68: a day's start and end location for a route trip — day i runs start → end,
+    picking up POIs along the way. A base trip has no rows here (it uses trips.base_*)."""
+
+    __tablename__ = "trip_day_anchors"
+
+    trip_id: Mapped[int] = mapped_column(
+        ForeignKey("trips.id", ondelete="CASCADE"), primary_key=True
+    )
+    day_index: Mapped[int] = mapped_column(Integer, primary_key=True)  # 0-based
+    start_lat: Mapped[float] = mapped_column(Float)
+    start_lon: Mapped[float] = mapped_column(Float)
+    start_name: Mapped[str | None] = mapped_column(String, nullable=True)
+    end_lat: Mapped[float] = mapped_column(Float)
+    end_lon: Mapped[float] = mapped_column(Float)
+    end_name: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class TripPoi(Base):
+    """HYL-68: a trip's candidate POI pool — a SOFT reference (no FK) to a library POI by
+    its (city_slug, id). A route trip composes POIs from several towns/places, and the ref
+    survives library edits (like trip_stops' soft poi_id)."""
+
+    __tablename__ = "trip_pois"
+
+    trip_id: Mapped[int] = mapped_column(
+        ForeignKey("trips.id", ondelete="CASCADE"), primary_key=True
+    )
+    city_slug: Mapped[str] = mapped_column(String, primary_key=True)
+    poi_id: Mapped[str] = mapped_column(String, primary_key=True)
