@@ -10,7 +10,7 @@ slug and a SQLAlchemy `Session` (FastAPI's `Depends(get_session)`, or
 import math
 import re
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, tuple_
 from sqlalchemy.orm import Session
 
 from . import models_db as m
@@ -147,15 +147,23 @@ def _add_stops(trip: m.Trip, result: dict, db: Session) -> None:
             ))
 
 
-def save_trip(city: str, meta: dict, locks: list, result: dict, db: Session) -> m.Trip:
-    """Persist a trip + its stops in one transaction. `meta` carries the column
-    fields (title/status/notes/start_date/num_days/day_*_min/profile/balance/base_*)."""
+def save_trip(city: str, meta: dict, locks: list, result: dict, db: Session,
+              *, anchors: list[dict] | None = None,
+              poi_refs: list[tuple[str, str]] | None = None) -> m.Trip:
+    """Persist a trip + its stops in one transaction. `meta` carries the column fields
+    (title/status/notes/start_date/num_days/day_*_min/profile/balance/mode/base_*). A
+    route trip (HYL-68) also passes `anchors` (per-day start/end dicts) and `poi_refs`
+    ((city_slug, poi_id) candidate pool)."""
     trip = m.Trip(city_slug=city, locks=locks, result=result,
                   total_travel_min=result.get("total_travel_min"),
                   feasible=bool(result.get("feasible", True)), **meta)
     db.add(trip)
-    db.flush()                      # assign trip.id before the stop rows
+    db.flush()                      # assign trip.id before the child rows
     _add_stops(trip, result, db)
+    if anchors:
+        save_day_anchors(trip.id, anchors, db)
+    if poi_refs is not None:
+        set_trip_pois(trip.id, poi_refs, db)
     db.commit()
     db.refresh(trip)
     return trip
@@ -203,9 +211,11 @@ def update_trip_meta(trip_id: int, fields: dict, db: Session) -> m.Trip | None:
     return trip
 
 
-def update_trip(trip: m.Trip, meta: dict, locks: list, result: dict, db: Session) -> m.Trip:
+def update_trip(trip: m.Trip, meta: dict, locks: list, result: dict, db: Session,
+                *, anchors: list[dict] | None = None,
+                poi_refs: list[tuple[str, str]] | None = None) -> m.Trip:
     """Replace everything about a saved trip from the current session (in-place PUT):
-    metadata + solve-param columns + locks + result snapshot + stops."""
+    metadata + solve-param columns + locks + result snapshot + stops (+ route anchors/pool)."""
     for k, v in meta.items():
         setattr(trip, k, v)
     trip.locks = locks
@@ -214,6 +224,10 @@ def update_trip(trip: m.Trip, meta: dict, locks: list, result: dict, db: Session
     trip.total_travel_min = result.get("total_travel_min")
     trip.feasible = bool(result.get("feasible", True))
     _add_stops(trip, result, db)
+    if anchors is not None:
+        save_day_anchors(trip.id, anchors, db)
+    if poi_refs is not None:
+        set_trip_pois(trip.id, poi_refs, db)
     db.commit()
     db.refresh(trip)
     return trip
@@ -235,6 +249,68 @@ def delete_trip(trip_id: int, db: Session) -> bool:
     trip = db.get(m.Trip, trip_id)
     if trip is None:
         return False
-    db.delete(trip)                 # trip_stops go via FK ON DELETE CASCADE
+    db.delete(trip)                 # stops / anchors / pool go via FK ON DELETE CASCADE
     db.commit()
     return True
+
+
+# --- Route trips: per-day anchors + candidate POI pool (HYL-68) ---------------
+
+def save_day_anchors(trip_id: int, anchors: list[dict], db: Session) -> None:
+    """Replace a route trip's per-day (start, end) anchors. `anchors` is ordered by day;
+    each is a dict of start_lat/start_lon/start_name + end_lat/end_lon/end_name."""
+    db.execute(delete(m.TripDayAnchor).where(m.TripDayAnchor.trip_id == trip_id))
+    for i, a in enumerate(anchors):
+        db.add(m.TripDayAnchor(trip_id=trip_id, day_index=i, **a))
+
+
+def load_day_anchors(trip_id: int, db: Session) -> list[m.TripDayAnchor]:
+    """A route trip's anchors in day order (empty for a base trip)."""
+    return list(db.scalars(
+        select(m.TripDayAnchor).where(m.TripDayAnchor.trip_id == trip_id)
+        .order_by(m.TripDayAnchor.day_index)
+    ).all())
+
+
+def set_trip_pois(trip_id: int, refs: list[tuple[str, str]], db: Session) -> None:
+    """Replace a trip's candidate POI pool with the given (city_slug, poi_id) refs."""
+    db.execute(delete(m.TripPoi).where(m.TripPoi.trip_id == trip_id))
+    for city_slug, poi_id in refs:
+        db.add(m.TripPoi(trip_id=trip_id, city_slug=city_slug, poi_id=poi_id))
+
+
+def add_trip_poi(trip_id: int, city_slug: str, poi_id: str, db: Session) -> None:
+    """Add one POI to a trip's pool (idempotent — re-adding the same ref is a no-op)."""
+    if db.get(m.TripPoi, {"trip_id": trip_id, "city_slug": city_slug, "poi_id": poi_id}) is None:
+        db.add(m.TripPoi(trip_id=trip_id, city_slug=city_slug, poi_id=poi_id))
+
+
+def pool_poi_id(city_slug: str, poi_id: str) -> str:
+    """The identity of a POI *inside a route pool*. Library ids are unique only within a
+    city (see `_unique_id`), but a route pool spans several towns, so two cities can each
+    hold a "museum"/"downtown". Qualify with the city ("city:id") so pooled POIs stay
+    distinct — and so the solver's stops/dropped and the user's locks reference one POI,
+    not two. Deterministic, so a lock keeps matching across re-solves. (City slugs and POI
+    ids are `[a-z0-9-]` only, so the ":" separator is unambiguous.)"""
+    return f"{city_slug}:{poi_id}"
+
+
+def load_pois_by_refs(refs: list[tuple[str, str]], db: Session) -> list[POI]:
+    """Fetch library POIs by their (city_slug, id) refs in one query (skips any missing) —
+    the pool for a route trip spans multiple towns/places. Returned POIs carry a city-
+    qualified `id` (see `pool_poi_id`) so a slug shared across cities can't collide."""
+    if not refs:
+        return []
+    rows = db.scalars(
+        select(m.POI).where(tuple_(m.POI.city_slug, m.POI.id).in_([(c, p) for c, p in refs]))
+        .order_by(m.POI.created_at, m.POI.id)
+    ).all()
+    return [_to_poi(r).model_copy(update={"id": pool_poi_id(r.city_slug, r.id)}) for r in rows]
+
+
+def load_trip_pool(trip_id: int, db: Session) -> list[POI]:
+    """The trip's candidate POIs (spans towns/places), skipping any since-deleted."""
+    refs = db.execute(
+        select(m.TripPoi.city_slug, m.TripPoi.poi_id).where(m.TripPoi.trip_id == trip_id)
+    ).all()
+    return load_pois_by_refs([(c, p) for c, p in refs], db)

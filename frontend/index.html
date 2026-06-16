@@ -89,13 +89,25 @@
 
       <details class="sec" open>
         <summary>Trip settings</summary>
+        <label class="route-toggle">
+          <input type="checkbox" id="routemode" /> 🚗 Road trip — each day has its own start &amp; end (no single base)
+        </label>
+        <div id="route-panel" hidden>
+          <div class="wp-search search">
+            <input id="wp" placeholder="➕ Add a stop / overnight — search a place…" autocomplete="off" />
+            <div id="wp-results" class="results"></div>
+          </div>
+          <ol id="waypoints" class="waypoints"></ol>
+          <p class="hint muted">Each consecutive pair is one day (stop 1 → stop 2 = day 1). POIs from this
+            place's library fill each leg. Keep the whole route within one US region.</p>
+        </div>
         <div class="ctl">
-          <label>Days<input id="days" type="number" value="2" min="1" /></label>
+          <label class="base-field">Days<input id="days" type="number" value="2" min="1" /></label>
           <label>Balance<input id="balance" type="number" value="5" min="0" /></label>
           <label>Start<input id="start" value="09:00" /></label>
           <label>End<input id="end" value="19:00" /></label>
-          <label>Base lat<input id="blat" value="34.9858" /></label>
-          <label>Base lon<input id="blon" value="135.7588" /></label>
+          <label class="base-field">Base lat<input id="blat" value="34.9858" /></label>
+          <label class="base-field">Base lon<input id="blon" value="135.7588" /></label>
           <label>Mode
             <select id="profile">
               <option value="foot" selected>walking</option>

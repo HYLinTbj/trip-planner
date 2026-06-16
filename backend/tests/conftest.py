@@ -32,8 +32,16 @@ def make_poi(
     )
 
 
-def line_matrix(n: int, gap: int = 10) -> list[list[int]]:
-    """An (n+1)x(n+1) symmetric integer-minute matrix (index 0 = base, then n POIs)
-    laid out on a line: travel(i, j) = |i - j| * gap, diagonal 0."""
-    size = n + 1
-    return [[abs(i - j) * gap for j in range(size)] for i in range(size)]
+def matrix_from_positions(positions: list[float], gap: int = 10) -> list[list[int]]:
+    """Symmetric integer-minute matrix from 1-D positions: travel(i, j) = |posᵢ-posⱼ|*gap."""
+    return [[int(abs(a - b) * gap) for b in positions] for a in positions]
+
+
+def base_line(num_days: int, poi_positions: list[float], gap: int = 10):
+    """(day_anchors, matrix) for a single-base trip on a line: the base (position 0)
+    duplicated into 2*num_days co-located anchor nodes, then POIs at `poi_positions`
+    (same order as the `pois` list passed to plan_trip). Mirrors how main._run lays out
+    a base-mode solve — every day starts and ends at the base."""
+    day_anchors = [(2 * i, 2 * i + 1) for i in range(num_days)]
+    positions = [0.0] * (2 * num_days) + list(poi_positions)
+    return day_anchors, matrix_from_positions(positions, gap)

@@ -44,6 +44,17 @@ class Lock(BaseModel):
     time: Optional[str] = None   # "HH:MM" arrival, for "pin" (a reservation)
 
 
+class DayAnchor(BaseModel):
+    """HYL-68: a day's start and end location for a route trip (day i: start → end, POIs
+    picked up along the way). A single-base trip has every day's start == end == the base."""
+    start_lat: float
+    start_lon: float
+    start_name: Optional[str] = None
+    end_lat: float
+    end_lon: float
+    end_name: Optional[str] = None
+
+
 class POICreate(BaseModel):
     """Inbound payload for adding a POI to the library (the id is server-assigned).
 
