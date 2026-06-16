@@ -68,3 +68,11 @@ def region_for_point(lat: float, lon: float) -> str | None:
     info = geocode.reverse(lat, lon, detail=True)
     addr = info.get("address") or {}
     return region_for_state(addr.get("ISO3166-2-lvl4")) or region_for_state(addr.get("state"))
+
+
+def region_for_points(points: list[tuple[float, float]]) -> str | None:
+    """The single US region covering every point, or None when they fall outside coverage
+    or span more than one region — the within-region constraint for route trips (HYL-68).
+    A trip whose anchors/POIs cross regions can't be matrixed by one regional engine yet."""
+    regions = {region_for_point(lat, lon) for lat, lon in points}
+    return regions.pop() if len(regions) == 1 else None
