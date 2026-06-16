@@ -1,9 +1,10 @@
 """Step 2–4: the scheduling core — Tourist Trip Design Problem via OR-Tools.
 
-Days are modeled as vehicles that start and end at the base (hotel). Opening
-hours become time windows, dwell time becomes service time, and importance
-becomes a drop-penalty so low-value POIs are shed when a day can't hold
-everything.
+Each day is a vehicle with its own start and end *anchor* (HYL-68): day i runs from
+anchor start_i to anchor end_i, picking up POIs along the way. Opening hours become
+time windows, dwell time becomes service time, and importance becomes a drop-penalty
+so low-value POIs are shed when a day can't hold everything. A single-base trip is the
+special case where every anchor shares the base's coordinates.
 
 Step 4 adds *locks* — the user's edits become hard constraints, then we
 re-solve around them:
@@ -56,15 +57,27 @@ def _infeasible(reason: str, auto_dropped: list[str], day_start: int, day_end: i
 def plan_trip(
     pois: list[POI],
     matrix_min: list[list[int]],
-    num_days: int,
+    day_anchors: list[tuple[int, int]],
     day_start: int,
     day_end: int,
     time_limit_s: int = 5,
     balance: int = 0,
     locks: list[Lock] | None = None,
 ) -> dict:
-    """matrix_min: (N+1)x(N+1) integer-minute matrix; index 0 = base, then pois."""
+    """Solve an itinerary over per-day (start, end) anchors.
+
+    matrix_min: square integer-minute matrix over [anchor nodes…, *pois] — anchor
+      nodes occupy indices 0..A-1, POIs occupy A..A+len(pois)-1.
+    day_anchors: one (start_node, end_node) index pair per day (num_days =
+      len(day_anchors)); every value indexes an anchor node. OR-Tools requires the
+      start/end node indices to be distinct, so co-located anchors (a single base, or
+      last night's hotel == this morning's start) are passed as distinct nodes that
+      happen to share coordinates. A single-base trip = every anchor at the base.
+    """
     locks = locks or []
+    num_days = len(day_anchors)
+    n_anchor = 1 + max(max(s, e) for s, e in day_anchors)   # anchors occupy 0..n_anchor-1
+
     excluded = {lk.poi_id for lk in locks if lk.type == "exclude"}
     day_of = {lk.poi_id: lk.day for lk in locks if lk.type in ("day", "pin") and lk.day is not None}
     pin_of = {lk.poi_id: hhmm_to_min(lk.time) for lk in locks if lk.type == "pin" and lk.time}
@@ -73,9 +86,9 @@ def plan_trip(
     windows = {id(p): _window(p, day_start, day_end) for p in pois}
     active = [p for p in pois if p.id not in excluded and windows[id(p)][1] >= windows[id(p)][0]]
     auto_dropped = [p.id for p in pois if p.id not in excluded and windows[id(p)][1] < windows[id(p)][0]]
-    node_of = {p.id: k + 1 for k, p in enumerate(active)}
+    active_ids = {p.id for p in active}
 
-    missing = [pid for pid in mandatory if pid not in node_of]
+    missing = [pid for pid in mandatory if pid not in active_ids]
     if missing:
         return _infeasible(
             "Can't include locked stop(s) that are excluded or can't fit their hours: "
@@ -96,12 +109,16 @@ def plan_trip(
             auto_dropped, day_start, day_end,
         )
 
+    # Subset the matrix to [all anchor nodes] + [active POI nodes]; in the local matrix M
+    # anchors keep indices 0..n_anchor-1 and active POIs follow at n_anchor.. .
     orig = {id(p): k for k, p in enumerate(pois)}
-    idxs = [0] + [orig[id(p)] + 1 for p in active]
+    idxs = list(range(n_anchor)) + [n_anchor + orig[id(p)] for p in active]
     M = [[matrix_min[i][j] for j in idxs] for i in idxs]
     n = len(active)
 
-    manager = pywrapcp.RoutingIndexManager(n + 1, num_days, 0)
+    starts = [s for s, _ in day_anchors]
+    ends = [e for _, e in day_anchors]
+    manager = pywrapcp.RoutingIndexManager(n_anchor + n, num_days, starts, ends)
     routing = pywrapcp.RoutingModel(manager)
     solver = routing.solver()
 
@@ -112,7 +129,7 @@ def plan_trip(
     routing.SetArcCostEvaluatorOfAllVehicles(travel_cb)  # objective: minimize travel
 
     def dwell(node):
-        return 0 if node == 0 else active[node - 1].dwell_min
+        return 0 if node < n_anchor else active[node - n_anchor].dwell_min
 
     def time_cb(from_i, to_i):
         f = manager.IndexToNode(from_i)
@@ -128,7 +145,7 @@ def plan_trip(
         # span cost on the shared wall-clock Time dimension instead would just
         # squash every day into the same hours (huge idle waits).
         def unit(from_i):
-            return 0 if manager.IndexToNode(from_i) == 0 else 1
+            return 0 if manager.IndexToNode(from_i) < n_anchor else 1
 
         unit_idx = routing.RegisterUnaryTransitCallback(unit)
         routing.AddDimension(unit_idx, 0, n, True, "Count")
@@ -137,8 +154,8 @@ def plan_trip(
     for v in range(num_days):
         time_dim.CumulVar(routing.Start(v)).SetRange(day_start, day_end)
 
-    for node in range(1, n + 1):
-        poi = active[node - 1]
+    for k, poi in enumerate(active):
+        node = n_anchor + k
         index = manager.NodeToIndex(node)
         low, high = windows[id(poi)]
         time_dim.CumulVar(index).SetRange(low, high)
@@ -169,11 +186,12 @@ def plan_trip(
     for v in range(num_days):
         idx = routing.Start(v)
         stops = []
-        prev_node, day_travel = 0, 0
+        prev_node = manager.IndexToNode(idx)   # the day's start anchor
+        day_travel = 0
         while not routing.IsEnd(idx):
             node = manager.IndexToNode(idx)
-            if node != 0:
-                poi = active[node - 1]
+            if node >= n_anchor:               # a POI (anchor depots are skipped)
+                poi = active[node - n_anchor]
                 visited.add(node)
                 arr = sol.Value(time_dim.CumulVar(idx))
                 leg = M[prev_node][node]
@@ -185,7 +203,8 @@ def plan_trip(
                 })
                 prev_node = node
             idx = sol.Value(routing.NextVar(idx))
-        day_travel += M[prev_node][0]  # leg back to base
+        end_node = manager.IndexToNode(routing.End(v))
+        day_travel += M[prev_node][end_node]   # leg to the day's end anchor
         total_travel += day_travel
         days.append({
             "stops": stops,
@@ -193,7 +212,8 @@ def plan_trip(
             "travel_min": day_travel,
         })
 
-    dropped = [active[node - 1].id for node in range(1, n + 1) if node not in visited]
+    dropped = [active[node - n_anchor].id
+               for node in range(n_anchor, n_anchor + n) if node not in visited]
     return {
         "feasible": True, "reason": None,
         "days": days, "dropped": dropped, "auto_dropped": auto_dropped,

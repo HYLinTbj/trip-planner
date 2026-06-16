@@ -148,7 +148,11 @@ def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, pr
     """Solve and shape the response with coordinates + HH:MM times for the map."""
     pois = list(store.load_pois(city, db).values())
     by_id = {p.id: p for p in pois}
-    coords = [(base_lat, base_lon)] + [(p.lat, p.lon) for p in pois]
+    # Single base: every day starts and ends at the base. Duplicated into 2*days distinct
+    # (co-located) anchor nodes because OR-Tools needs unique start/end indices per day.
+    anchor_coords = [(base_lat, base_lon)] * (2 * days)
+    day_anchors = [(2 * i, 2 * i + 1) for i in range(days)]
+    coords = anchor_coords + [(p.lat, p.lon) for p in pois]
     try:
         matrix = get_matrix_min(coords, profile=profile or DEFAULT_PROFILE,
                                 cache_path=str(CACHE_PATH), base_url=_engine_url(city, db))
@@ -156,7 +160,7 @@ def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, pr
         raise HTTPException(status_code=502, detail=f"Routing engine unreachable: {exc}") from exc
 
     ds, de = hhmm_to_min(start), hhmm_to_min(end)
-    res = plan_trip(pois, matrix, days, ds, de, time_limit, balance=balance, locks=locks)
+    res = plan_trip(pois, matrix, day_anchors, ds, de, time_limit, balance=balance, locks=locks)
 
     def stop_out(s: dict) -> dict:
         p = by_id[s["poi_id"]]
