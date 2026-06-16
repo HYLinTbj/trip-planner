@@ -25,7 +25,7 @@ from .engine import DEFAULT_PROFILE, base_url as engine_base_url, table_duration
 from .geocode import reverse as geocode_reverse, search as geocode_search
 from .llm import LLMNotConfigured, propose_candidates
 from .matrix import get_matrix_min
-from .models import Lock, POICreate, SuggestRequest
+from .models import DayAnchor, Lock, POICreate, SuggestRequest
 from .solver import hhmm_to_min, min_to_hhmm, plan_trip
 
 app = FastAPI(title="Trip Planner")
@@ -144,22 +144,24 @@ def matrix(city: str = DEFAULT_CITY, profile: str | None = None,
     }
 
 
-def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, profile, locks) -> dict:
-    """Solve and shape the response with coordinates + HH:MM times for the map."""
-    pois = list(store.load_pois(city, db).values())
+def _solve(pois, anchors, ds, de, balance, time_limit, profile, base_url, locks, base) -> dict:
+    """Core solve + map-shaping over per-day (start, end) anchors.
+
+    `anchors`: list of ((start_lat, start_lon, start_name), (end_lat, end_lon, end_name)),
+    one per day. `pois`: the candidate pool. `base`: (lat, lon) for a single-base trip,
+    else None. OR-Tools needs distinct start/end node indices, so each day's two anchors
+    are separate (possibly co-located) nodes 0..2*num_days-1, then the POIs.
+    """
     by_id = {p.id: p for p in pois}
-    # Single base: every day starts and ends at the base. Duplicated into 2*days distinct
-    # (co-located) anchor nodes because OR-Tools needs unique start/end indices per day.
-    anchor_coords = [(base_lat, base_lon)] * (2 * days)
-    day_anchors = [(2 * i, 2 * i + 1) for i in range(days)]
+    anchor_coords = [(a[k][0], a[k][1]) for a in anchors for k in (0, 1)]
+    day_anchors = [(2 * i, 2 * i + 1) for i in range(len(anchors))]
     coords = anchor_coords + [(p.lat, p.lon) for p in pois]
     try:
         matrix = get_matrix_min(coords, profile=profile or DEFAULT_PROFILE,
-                                cache_path=str(CACHE_PATH), base_url=_engine_url(city, db))
+                                cache_path=str(CACHE_PATH), base_url=base_url)
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Routing engine unreachable: {exc}") from exc
 
-    ds, de = hhmm_to_min(start), hhmm_to_min(end)
     res = plan_trip(pois, matrix, day_anchors, ds, de, time_limit, balance=balance, locks=locks)
 
     def stop_out(s: dict) -> dict:
@@ -170,10 +172,9 @@ def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, pr
             "departure_hhmm": min_to_hhmm(s["departure"]),
         }
 
-    return {
+    out = {
         "feasible": res.get("feasible", True),
         "reason": res.get("reason"),
-        "base": {"lat": base_lat, "lon": base_lon},
         "day_start": min_to_hhmm(ds),
         "day_end": min_to_hhmm(de),
         "days": [
@@ -181,8 +182,10 @@ def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, pr
                 "stops": [stop_out(s) for s in d["stops"]],
                 "return_hhmm": min_to_hhmm(d["return_min"]),
                 "travel_min": d["travel_min"],
+                "start": {"lat": anchors[i][0][0], "lon": anchors[i][0][1], "name": anchors[i][0][2]},
+                "end": {"lat": anchors[i][1][0], "lon": anchors[i][1][1], "name": anchors[i][1][2]},
             }
-            for d in res["days"]
+            for i, d in enumerate(res["days"])
         ],
         "dropped": [
             {"poi_id": pid, "name": by_id[pid].name, "lat": by_id[pid].lat,
@@ -191,6 +194,32 @@ def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, pr
         ],
         "total_travel_min": res["total_travel_min"],
     }
+    if base is not None:                      # back-compat: base trips still expose "base"
+        out["base"] = {"lat": base[0], "lon": base[1]}
+    return out
+
+
+def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, profile, locks) -> dict:
+    """Base-mode solve: one hotel — every day starts and ends at the base."""
+    pois = list(store.load_pois(city, db).values())
+    anchors = [((base_lat, base_lon, None), (base_lat, base_lon, None)) for _ in range(days)]
+    return _solve(pois, anchors, hhmm_to_min(start), hhmm_to_min(end), balance, time_limit,
+                  profile, _engine_url(city, db), locks, base=(base_lat, base_lon))
+
+
+def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks) -> dict:
+    """Route-mode solve (HYL-68): per-day (start, end) anchors over a candidate `pois` pool.
+    Rejects a trip whose anchors/POIs cross regions — one regional engine can't route it yet."""
+    pts = [(a[k][0], a[k][1]) for a in anchors for k in (0, 1)] + [(p.lat, p.lon) for p in pois]
+    region = places.region_for_points(pts)
+    if region is None:
+        raise HTTPException(
+            status_code=422,
+            detail=("Route must lie within one supported US region — its anchors/POIs span "
+                    "regions or fall outside coverage (cross-region routing isn't supported yet)."),
+        )
+    return _solve(pois, anchors, hhmm_to_min(start), hhmm_to_min(end), balance, time_limit,
+                  profile, engine_base_url(region=region), locks, base=None)
 
 
 @app.get("/plan")
@@ -223,6 +252,39 @@ def replan(req: ReplanRequest, db: Session = Depends(get_session)) -> dict:
     """Re-optimize honoring the user's locks — the 'you dispose' step."""
     return _run(req.city, db, req.days, req.start, req.end, req.base_lat, req.base_lon,
                 req.balance, req.time_limit, req.profile, req.locks)
+
+
+class POIRef(BaseModel):
+    """A library POI by its (city, id) — a route trip's pool can draw from several places."""
+    city: str
+    id: str
+
+
+class RoutePlanRequest(BaseModel):
+    """Ad-hoc route solve (HYL-68): per-day start/end anchors + a candidate POI pool. No
+    save (see POST /trips to persist). The region is derived from the anchors/POIs; a route
+    that crosses regions is rejected (the within-region constraint)."""
+    day_anchors: list[DayAnchor]
+    poi_refs: list[POIRef] = []
+    start: str = "09:00"
+    end: str = "19:00"
+    balance: int = 5
+    time_limit: int = 3
+    profile: str | None = None
+    locks: list[Lock] = []
+
+
+@app.post("/plan-route")
+def plan_route(req: RoutePlanRequest, db: Session = Depends(get_session)) -> dict:
+    """Plan a multi-leg trip over per-day (start, end) anchors, choosing the best POIs for
+    each leg. Returns per-day legs (start → stops → end). 422 if it crosses regions."""
+    if not req.day_anchors:
+        raise HTTPException(status_code=422, detail="A route needs at least one day's anchors.")
+    pois = store.load_pois_by_refs([(r.city, r.id) for r in req.poi_refs], db)
+    anchors = [((a.start_lat, a.start_lon, a.start_name), (a.end_lat, a.end_lon, a.end_name))
+               for a in req.day_anchors]
+    return _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
+                      req.profile, req.locks)
 
 
 # --- POI library: list / create / delete (the write path behind "add a POI") --

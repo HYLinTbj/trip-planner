@@ -279,12 +279,9 @@ def set_trip_pois(trip_id: int, refs: list[tuple[str, str]], db: Session) -> Non
         db.add(m.TripPoi(trip_id=trip_id, city_slug=city_slug, poi_id=poi_id))
 
 
-def load_trip_pool(trip_id: int, db: Session) -> list[POI]:
-    """The trip's candidate POIs, fetched from the library by their (city_slug, id) refs
-    (skipping any since-deleted) in a single query — the pool spans multiple towns/places."""
-    refs = db.execute(
-        select(m.TripPoi.city_slug, m.TripPoi.poi_id).where(m.TripPoi.trip_id == trip_id)
-    ).all()
+def load_pois_by_refs(refs: list[tuple[str, str]], db: Session) -> list[POI]:
+    """Fetch library POIs by their (city_slug, id) refs in one query (skips any missing) —
+    the pool for a route trip spans multiple towns/places."""
     if not refs:
         return []
     rows = db.scalars(
@@ -292,3 +289,11 @@ def load_trip_pool(trip_id: int, db: Session) -> list[POI]:
         .order_by(m.POI.created_at, m.POI.id)
     ).all()
     return [_to_poi(r) for r in rows]
+
+
+def load_trip_pool(trip_id: int, db: Session) -> list[POI]:
+    """The trip's candidate POIs (spans towns/places), skipping any since-deleted."""
+    refs = db.execute(
+        select(m.TripPoi.city_slug, m.TripPoi.poi_id).where(m.TripPoi.trip_id == trip_id)
+    ).all()
+    return load_pois_by_refs([(c, p) for c, p in refs], db)

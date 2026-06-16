@@ -130,6 +130,31 @@ def plan_trip(days: int = 2, start: str = "09:00", end: str = "19:00",
 
 
 @mcp.tool()
+def plan_route(day_anchors: list[dict], poi_refs: list[dict] | None = None,
+               start: str = "09:00", end: str = "19:00", balance: int = 5,
+               profile: str = "car", locks: list[dict] | None = None) -> dict:
+    """Plan a multi-leg trip (HYL-68): each day has its OWN start and end location, and the
+    solver picks the best POIs for each leg — for road trips / changing hotels / airport
+    starts, no single base. GROUND anchors first (coords from search_places or create_place;
+    never invent them). `day_anchors`: one per day, each {start_lat, start_lon, start_name?,
+    end_lat, end_lon, end_name?}. `poi_refs`: the candidate pool as {city, id} refs (from
+    list_pois/add_poi across the towns on the route). Returns per-day legs (start → stops →
+    end) + dropped POIs. Errors if the route crosses regions (one regional engine can't route
+    it yet) — keep anchors/POIs within one US region for now."""
+    try:
+        req = main.RoutePlanRequest(
+            day_anchors=[main.DayAnchor(**a) for a in day_anchors],
+            poi_refs=[main.POIRef(**r) for r in (poi_refs or [])],
+            start=start, end=end, balance=balance, profile=profile,
+            locks=[Lock(**lk) for lk in (locks or [])],
+        )
+        with SessionLocal() as db:
+            return main.plan_route(req, db)
+    except Exception as exc:  # region guard (422), engine unreachable, bad anchor, etc.
+        return {"error": str(exc)}
+
+
+@mcp.tool()
 def save_trip(title: str, days: int = 2, start: str = "09:00", end: str = "19:00",
               balance: int = 5, profile: str = "foot", locks: list[dict] | None = None,
               start_date: str | None = None, notes: str | None = None,
