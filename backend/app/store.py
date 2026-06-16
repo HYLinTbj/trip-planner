@@ -151,7 +151,7 @@ def save_trip(city: str, meta: dict, locks: list, result: dict, db: Session,
               *, anchors: list[dict] | None = None,
               poi_refs: list[tuple[str, str]] | None = None) -> m.Trip:
     """Persist a trip + its stops in one transaction. `meta` carries the column fields
-    (title/status/notes/start_date/num_days/day_*_min/profile/balance/mode/base_*). A
+    (title/status/notes/start_date/num_days/day_windows/profile/balance/mode/base_*). A
     route trip (HYL-68) also passes `anchors` (per-day start/end dicts) and `poi_refs`
     ((city_slug, poi_id) candidate pool)."""
     trip = m.Trip(city_slug=city, locks=locks, result=result,

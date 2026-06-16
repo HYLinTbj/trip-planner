@@ -116,6 +116,14 @@
             </select>
           </label>
         </div>
+        <label class="perday-toggle">
+          <input type="checkbox" id="perday" /> 🕑 Customize each day's hours
+        </label>
+        <div id="perday-panel" hidden>
+          <ol id="day-windows" class="day-windows"></ol>
+          <p class="hint muted">Each day's own start &amp; end — e.g. an early start, or a
+            late, chill day. Re-optimize to apply.</p>
+        </div>
         <div class="btns">
           <button id="go">Plan (fresh)</button>
           <button id="reopt" class="secondary">Re-optimize</button>

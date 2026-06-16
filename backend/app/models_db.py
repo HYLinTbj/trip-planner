@@ -77,8 +77,9 @@ class Trip(Base):
     start_date: Mapped[date | None] = mapped_column(Date, nullable=True)  # day i = start_date + i
     # Solve parameters — enough to re-optimize the trip later (with `locks`).
     num_days: Mapped[int] = mapped_column(Integer)
-    day_start_min: Mapped[int] = mapped_column(Integer)   # minutes from midnight
-    day_end_min: Mapped[int] = mapped_column(Integer)
+    # HYL-69: per-day [start_min, end_min] windows (minutes from midnight), one entry per
+    # day. A same-hours-every-day trip just repeats one window across the list.
+    day_windows: Mapped[list] = mapped_column(JSON)
     profile: Mapped[str] = mapped_column(String)          # foot | car | bicycle | transit
     balance: Mapped[int] = mapped_column(Integer, default=0)
     # HYL-68: "base" = one hotel (base_lat/lon set); "route" = per-day start/end anchors

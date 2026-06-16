@@ -108,12 +108,15 @@ def delete_poi(poi_id: str, city: str = CITY) -> dict:
 def plan_trip(days: int = 2, start: str = "09:00", end: str = "19:00",
               base_lat: float | None = None, base_lon: float | None = None,
               balance: int = 5, profile: str = "foot",
-              locks: list[dict] | None = None, city: str = CITY) -> dict:
+              locks: list[dict] | None = None, city: str = CITY,
+              day_windows: list[dict] | None = None) -> dict:
     """Build a feasibility-checked itinerary over the library (respecting opening
     hours, dwell time, and real travel time). `profile` is "foot" or "car". `locks`
     are the user's dispositions — each {poi_id, type, day?, time?} with
     type ∈ exclude | include | day | pin — pass them to re-optimize around fixed
-    choices. Returns days→stops (with arrival/departure times) plus dropped POIs;
+    choices. Optionally pass `day_windows` (HYL-69) — one {start, end} ("HH:MM") per day —
+    to give each day its own hours (early start, chill day); omit for the same start/end
+    every day. Returns days→stops (with arrival/departure times) plus dropped POIs;
     check `feasible`/`reason` for infeasible locks."""
     lock_objs = [Lock(**lk) for lk in (locks or [])]
     try:
@@ -123,8 +126,10 @@ def plan_trip(days: int = 2, start: str = "09:00", end: str = "19:00",
                 if c:
                     base_lat = c.base_lat if base_lat is None else base_lat
                     base_lon = c.base_lon if base_lon is None else base_lon
+            win = main._day_windows_min(
+                [main.DayWindow(**w) for w in (day_windows or [])], start, end, days)
             return main._run(city, db, days, start, end, base_lat, base_lon,
-                             balance, 3, profile, lock_objs)
+                             balance, 3, profile, lock_objs, win)
     except Exception as exc:  # routing engine unreachable, bad lock, etc.
         return {"error": str(exc)}
 
@@ -132,7 +137,8 @@ def plan_trip(days: int = 2, start: str = "09:00", end: str = "19:00",
 @mcp.tool()
 def plan_route(day_anchors: list[dict], poi_refs: list[dict] | None = None,
                start: str = "09:00", end: str = "19:00", balance: int = 5,
-               profile: str = "car", locks: list[dict] | None = None) -> dict:
+               profile: str = "car", locks: list[dict] | None = None,
+               day_windows: list[dict] | None = None) -> dict:
     """Plan a multi-leg trip (HYL-68): each day has its OWN start and end location, and the
     solver picks the best POIs for each leg — for road trips / changing hotels / airport
     starts, no single base. GROUND anchors first (coords from search_places or create_place;
@@ -149,6 +155,7 @@ def plan_route(day_anchors: list[dict], poi_refs: list[dict] | None = None,
             poi_refs=[main.POIRef(**r) for r in (poi_refs or [])],
             start=start, end=end, balance=balance, profile=profile,
             locks=[Lock(**lk) for lk in (locks or [])],
+            day_windows=[main.DayWindow(**w) for w in (day_windows or [])],
         )
         with SessionLocal() as db:
             return main.plan_route(req, db)
@@ -161,9 +168,10 @@ def save_route_trip(title: str, day_anchors: list[dict], poi_refs: list[dict] | 
                     start: str = "09:00", end: str = "19:00", balance: int = 5,
                     profile: str = "car", locks: list[dict] | None = None,
                     start_date: str | None = None, notes: str | None = None,
-                    city: str = CITY) -> dict:
+                    city: str = CITY, day_windows: list[dict] | None = None) -> dict:
     """Solve and SAVE a road trip (HYL-68): per-day start/end `day_anchors` over a (city,id)
-    `poi_refs` pool — like plan_route but persisted. Returns the saved trip (with its id).
+    `poi_refs` pool — like plan_route but persisted. Optionally pass `day_windows` (HYL-69),
+    one {start, end} per day, for per-day hours. Returns the saved trip (with its id).
     Fails without saving if infeasible or the route crosses regions."""
     try:
         req = main.TripCreate(
@@ -172,6 +180,7 @@ def save_route_trip(title: str, day_anchors: list[dict], poi_refs: list[dict] | 
             poi_refs=[main.POIRef(**r) for r in (poi_refs or [])],
             start=start, end=end, balance=balance, profile=profile,
             locks=[Lock(**lk) for lk in (locks or [])], start_date=start_date, notes=notes,
+            day_windows=[main.DayWindow(**w) for w in (day_windows or [])],
         )
         with SessionLocal() as db:
             return main.create_trip(req, db)
@@ -225,16 +234,18 @@ def reoptimize_trip(trip_id: int) -> dict:
 def save_trip(title: str, days: int = 2, start: str = "09:00", end: str = "19:00",
               balance: int = 5, profile: str = "foot", locks: list[dict] | None = None,
               start_date: str | None = None, notes: str | None = None,
-              city: str = CITY) -> dict:
+              city: str = CITY, day_windows: list[dict] | None = None) -> dict:
     """Solve and SAVE a named trip over `city`'s library so the user can review it
-    later. `start_date` (YYYY-MM-DD) anchors day 1 on the calendar. The server
-    solves with the same engine as plan_trip and persists the itinerary; returns
-    the saved trip (with its `id`). Fails without saving if the solve is infeasible."""
+    later. `start_date` (YYYY-MM-DD) anchors day 1 on the calendar. Optionally pass
+    `day_windows` (HYL-69), one {start, end} per day, to give each day its own hours.
+    The server solves with the same engine as plan_trip and persists the itinerary;
+    returns the saved trip (with its `id`). Fails without saving if the solve is infeasible."""
     try:
         with SessionLocal() as db:
             req = main.TripCreate(city=city, title=title, days=days, start=start, end=end,
                                   balance=balance, profile=profile, locks=locks or [],
-                                  start_date=start_date, notes=notes)
+                                  start_date=start_date, notes=notes,
+                                  day_windows=[main.DayWindow(**w) for w in (day_windows or [])])
             return main.create_trip(req, db)
     except Exception as exc:  # infeasible solve (422), engine down, bad lock, …
         return {"error": str(exc)}

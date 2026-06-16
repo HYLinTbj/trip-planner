@@ -36,7 +36,7 @@ def db():
 
 def _route_meta(**over):
     meta = dict(title="RT", status="draft", notes=None, start_date=None, num_days=1,
-                day_start_min=540, day_end_min=1140, profile="car", balance=5,
+                day_windows=[[540, 1140]], profile="car", balance=5,
                 mode="route", base_lat=None, base_lon=None)
     meta.update(over)
     return meta
@@ -213,3 +213,42 @@ def test_update_route_to_base_clears_anchors_and_pool(db):
     assert out["mode"] == "base" and "base" in out
     assert store.load_day_anchors(tid, db) == []
     assert store.load_trip_pool(tid, db) == []
+
+
+# --- HYL-69: per-day windows persist + drive re-optimize ---------------------------------
+
+_TWO_DAY_CANNED = {"feasible": True, "total_travel_min": 0, "dropped": [],
+                   "days": [{"stops": [], "return_hhmm": "11:00", "travel_min": 0},
+                            {"stops": [], "return_hhmm": "18:00", "travel_min": 0}]}
+
+
+def _two_day_window_trip(db):
+    store.add_city("Denver", 39.75, -104.99, "west", db)
+    return main.create_trip(main.TripCreate(
+        city="denver", title="WB", mode="base", days=2, base_lat=39.75, base_lon=-104.99,
+        day_windows=[main.DayWindow(start="07:00", end="11:00"),
+                     main.DayWindow(start="11:00", end="18:00")],
+        result=_TWO_DAY_CANNED), db)
+
+
+def test_base_trip_persists_per_day_windows(db):
+    out = _two_day_window_trip(db)
+    # Each day surfaces its own window; there is no top-level envelope (HYL-69).
+    assert [(d["day_start"], d["day_end"]) for d in out["days"]] == \
+        [("07:00", "11:00"), ("11:00", "18:00")]
+    assert "day_start" not in out and "day_end" not in out
+    assert store.get_trip(out["id"], db).day_windows == [[420, 660], [660, 1080]]
+
+
+def test_reoptimize_base_passes_stored_day_windows(db, monkeypatch):
+    tid = _two_day_window_trip(db)["id"]
+    captured = {}
+
+    def fake_run(city, db, days, start, end, blat, blon, balance, tl, profile, locks,
+                 day_windows=None):
+        captured["win"] = day_windows
+        return _TWO_DAY_CANNED
+
+    monkeypatch.setattr(main, "_run", fake_run)
+    main.reoptimize_trip(tid, db=db)
+    assert captured["win"] == [(420, 660), (660, 1080)]   # the stored per-day windows, in minutes
