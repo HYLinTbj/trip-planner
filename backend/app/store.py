@@ -285,16 +285,27 @@ def add_trip_poi(trip_id: int, city_slug: str, poi_id: str, db: Session) -> None
         db.add(m.TripPoi(trip_id=trip_id, city_slug=city_slug, poi_id=poi_id))
 
 
+def pool_poi_id(city_slug: str, poi_id: str) -> str:
+    """The identity of a POI *inside a route pool*. Library ids are unique only within a
+    city (see `_unique_id`), but a route pool spans several towns, so two cities can each
+    hold a "museum"/"downtown". Qualify with the city ("city:id") so pooled POIs stay
+    distinct — and so the solver's stops/dropped and the user's locks reference one POI,
+    not two. Deterministic, so a lock keeps matching across re-solves. (City slugs and POI
+    ids are `[a-z0-9-]` only, so the ":" separator is unambiguous.)"""
+    return f"{city_slug}:{poi_id}"
+
+
 def load_pois_by_refs(refs: list[tuple[str, str]], db: Session) -> list[POI]:
     """Fetch library POIs by their (city_slug, id) refs in one query (skips any missing) —
-    the pool for a route trip spans multiple towns/places."""
+    the pool for a route trip spans multiple towns/places. Returned POIs carry a city-
+    qualified `id` (see `pool_poi_id`) so a slug shared across cities can't collide."""
     if not refs:
         return []
     rows = db.scalars(
         select(m.POI).where(tuple_(m.POI.city_slug, m.POI.id).in_([(c, p) for c, p in refs]))
         .order_by(m.POI.created_at, m.POI.id)
     ).all()
-    return [_to_poi(r) for r in rows]
+    return [_to_poi(r).model_copy(update={"id": pool_poi_id(r.city_slug, r.id)}) for r in rows]
 
 
 def load_trip_pool(trip_id: int, db: Session) -> list[POI]:

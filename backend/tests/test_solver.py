@@ -214,3 +214,10 @@ def test_route_day_with_no_pois_is_direct_leg():
     assert res["feasible"] is True
     assert res["days"][0]["stops"] == []
     assert res["days"][0]["travel_min"] == 200    # |0-20| * 10
+
+
+def test_no_day_anchors_is_gracefully_infeasible():
+    # No days at all -> a graceful feasible:false, not a ValueError from max() of an empty seq.
+    res = plan_trip([make_poi("a")], [], [], DAY_START, DAY_END, time_limit_s=1)
+    assert res["feasible"] is False
+    assert res["days"] == []

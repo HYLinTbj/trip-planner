@@ -218,7 +218,7 @@ def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks) -
     if region is None:
         raise HTTPException(
             status_code=422,
-            detail=("Route must lie within one supported US region — its anchors/POIs span "
+            detail=("Route must lie within one supported US region — its anchors span "
                     "regions or fall outside coverage (cross-region routing isn't supported yet)."),
         )
     return _solve(pois, anchors, hhmm_to_min(start), hhmm_to_min(end), balance, time_limit,
@@ -457,7 +457,9 @@ def _route_solve_and_meta(req: "TripCreate", db: Session):
     anchors = [((a.start_lat, a.start_lon, a.start_name), (a.end_lat, a.end_lon, a.end_name))
                for a in req.day_anchors]
     result = req.result
-    if result is None:   # solve now — the server's plan is the source of truth
+    # Solve now (this is where the within-region guard runs); a client-supplied result is
+    # trusted as-is — same as base mode — since it came from a prior region-checked solve.
+    if result is None:   # the server's plan is the source of truth
         result = _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
                             req.profile, req.locks)
         if not result.get("feasible", True):
@@ -548,7 +550,9 @@ def update_trip(trip_id: int, req: TripCreate, db: Session = Depends(get_session
                 num_days=req.days, day_start_min=hhmm_to_min(req.start),
                 day_end_min=hhmm_to_min(req.end), profile=req.profile, balance=req.balance,
                 mode="base", base_lat=base_lat, base_lon=base_lon)
-    store.update_trip(t, meta, [lk.model_dump() for lk in req.locks], result, db)
+    # Pass empty anchors/pool so a trip switched route -> base drops its stale route rows.
+    store.update_trip(t, meta, [lk.model_dump() for lk in req.locks], result, db,
+                      anchors=[], poi_refs=[])
     return _trip_out(t, store.trip_stops(trip_id, db))
 
 

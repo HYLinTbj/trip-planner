@@ -34,3 +34,23 @@ def test_run_route_rejects_cross_region(monkeypatch):
         main._run_route([make_poi("p1", lat=1, lon=1)],
                         [((0, 0, "A"), (1, 1, "B"))], "09:00", "19:00", 5, 1, "car", [])
     assert exc.value.status_code == 422
+
+
+def test_run_route_keeps_same_name_pois_from_different_cities_distinct(monkeypatch):
+    # A cross-city pool gives two POIs the same NAME but distinct city-qualified ids
+    # (store.pool_poi_id). The output must keep them separate — before the fix, _solve's
+    # by_id collapsed equal ids and cross-wired one stop's coordinates onto the other.
+    monkeypatch.setattr(main.places, "region_for_points", lambda pts: "west")
+    # coords = [start(0), end(30), denver "Museum"(10), boulder "Museum"(20)] on a line
+    monkeypatch.setattr(main, "get_matrix_min",
+                        lambda coords, **kw: matrix_from_positions([0, 30, 10, 20], gap=10))
+
+    pois = [make_poi("denver:museum", name="Museum", lat=10, lon=0),
+            make_poi("boulder:museum", name="Museum", lat=20, lon=0)]
+    res = main._run_route(pois, [((0, 0, "A"), (30, 0, "B"))], "09:00", "19:00", 5, 1, "car", [])
+
+    assert res["feasible"] is True
+    stops = {s["poi_id"]: s for s in res["days"][0]["stops"]}
+    assert set(stops) == {"denver:museum", "boulder:museum"}
+    assert stops["denver:museum"]["lat"] == 10      # coordinates not cross-wired
+    assert stops["boulder:museum"]["lat"] == 20

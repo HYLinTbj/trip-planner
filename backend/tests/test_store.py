@@ -165,3 +165,51 @@ def test_reoptimize_route_resolves_from_stored_anchors_and_pool(db, monkeypatch)
     assert captured["pois"] == ["Museum"]   # re-solved from the stored pool
     assert captured["ndays"] == 1           # and the stored anchors
     assert out["total_travel_min"] == 1
+
+
+# --- cross-city pool identity: library ids are unique only within a city ------------------
+
+def test_load_pois_by_refs_city_qualifies_ids(db):
+    # Same name in two cities -> the same bare library id ("museum") in each. The pool must
+    # qualify them ("city:id") so they don't collide into one POI when solved/rendered.
+    store.add_city("Denver", 39.75, -104.99, "west", db)
+    store.add_city("Boulder", 40.01, -105.27, "west", db)
+    store.add_poi("denver", POICreate(name="Museum", lat=39.7, lon=-104.9), db)
+    store.add_poi("boulder", POICreate(name="Museum", lat=40.0, lon=-105.2), db)
+
+    pool = store.load_pois_by_refs([("denver", "museum"), ("boulder", "museum")], db)
+    by_id = {p.id: p for p in pool}
+    assert set(by_id) == {"denver:museum", "boulder:museum"}   # no collision
+    assert by_id["denver:museum"].lat == 39.7
+    assert by_id["boulder:museum"].lat == 40.0
+
+
+def test_load_trip_pool_city_qualifies_ids(db):
+    store.add_city("Denver", 39.75, -104.99, "west", db)
+    store.add_city("Boulder", 40.01, -105.27, "west", db)
+    store.add_poi("denver", POICreate(name="Spot", lat=39.7, lon=-104.9), db)
+    store.add_poi("boulder", POICreate(name="Spot", lat=40.0, lon=-105.2), db)
+    trip = store.save_trip("denver", _route_meta(), [], {"days": []}, db,
+                           anchors=[{"start_lat": 39.75, "start_lon": -104.99, "start_name": None,
+                                     "end_lat": 40.01, "end_lon": -105.27, "end_name": None}],
+                           poi_refs=[("denver", "spot"), ("boulder", "spot")])
+    assert {p.id for p in store.load_trip_pool(trip.id, db)} == {"denver:spot", "boulder:spot"}
+
+
+def test_update_route_to_base_clears_anchors_and_pool(db):
+    # Switching a saved trip route -> base (PUT) must drop its now-meaningless route rows.
+    _seed_denver_boulder(db)
+    tid = main.create_trip(main.TripCreate(
+        city="denver", title="RT", mode="route", day_anchors=[main.DayAnchor(**_ANCHOR)],
+        poi_refs=[main.POIRef(city="denver", id="museum")], result=_CANNED), db)["id"]
+    assert store.load_day_anchors(tid, db) and store.load_trip_pool(tid, db)   # present first
+
+    base_canned = {"feasible": True, "total_travel_min": 1, "dropped": [],
+                   "days": [{"stops": [], "return_hhmm": "10:00", "travel_min": 1}]}
+    out = main.update_trip(tid, main.TripCreate(
+        city="denver", title="RT", mode="base", days=1,
+        base_lat=39.75, base_lon=-104.99, result=base_canned), db)
+
+    assert out["mode"] == "base" and "base" in out
+    assert store.load_day_anchors(tid, db) == []
+    assert store.load_trip_pool(tid, db) == []

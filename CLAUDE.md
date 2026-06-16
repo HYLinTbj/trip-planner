@@ -161,7 +161,10 @@ name/lat/lon and keep `poi_id` as a *soft* reference (no FK), so a trip still re
 after a library POI is edited or deleted. A **route trip** (HYL-68, `mode="route"`) also
 persists its per-day anchors (`trip_day_anchors`) + candidate pool (`trip_pois`, soft
 `(city_slug, poi_id)` refs spanning towns) and solves through `_run_route`; a base trip
-keeps its single `base_*` and solves through `_run`. API: `POST/GET/PUT/PATCH/DELETE /trips`
+keeps its single `base_*` and solves through `_run`. Because library ids are unique only
+*within* a city but a route pool spans towns, `store.load_pois_by_refs` hands the solver
+**city-qualified ids** (`"city:id"`, `store.pool_poi_id`) so a slug shared across cities
+can't collide — route-mode stops/dropped and locks all speak that qualified id. API: `POST/GET/PUT/PATCH/DELETE /trips`
 + `POST /trips/{id}/reoptimize`; MCP adds `save_trip`/`save_route_trip`/`list_trips`/`get_trip`
 plus `add_trip_poi`/`set_trip_pois`/`reoptimize_trip`. The frontend "Saved trips" panel loads
 a trip back into the live planner (base or route — restoring controls, anchors, and locks).

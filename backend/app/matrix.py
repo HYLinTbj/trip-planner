@@ -1,6 +1,6 @@
 """Travel-time matrix builder with a tiny on-disk cache.
 
-The solver wants an integer-minute matrix over [base, *pois]. The routing engine
+The solver wants an integer-minute matrix over [anchor/depot nodes…, *pois]. The routing engine
 is the source of truth, but remote ones are rate-limited, so we cache by a hash of
 the coordinates, profile, and backend URL to keep repeated solver runs offline.
 (The URL is in the key so the same profile name against a different engine — e.g.
@@ -48,7 +48,7 @@ def get_matrix_min(
     cache_path: str | Path | None = None,
     base_url: str | None = None,
 ) -> list[list[int]]:
-    """Return an N x N integer-minute matrix (index 0 = base, then the POIs).
+    """Return an N x N integer-minute matrix (anchor/depot nodes first, then the POIs).
 
     base_url pins which routing engine to query (the city's regional Valhalla); it is
     also part of the cache key, so a city served by a different region can't collide.

@@ -139,8 +139,10 @@ def plan_route(day_anchors: list[dict], poi_refs: list[dict] | None = None,
     never invent them). `day_anchors`: one per day, each {start_lat, start_lon, start_name?,
     end_lat, end_lon, end_name?}. `poi_refs`: the candidate pool as {city, id} refs (from
     list_pois/add_poi across the towns on the route). Returns per-day legs (start → stops →
-    end) + dropped POIs. Errors if the route crosses regions (one regional engine can't route
-    it yet) — keep anchors/POIs within one US region for now."""
+    end) + dropped POIs, each POI carrying a city-qualified id ("city:id") since the pool
+    spans towns — use that id (as returned) in any `locks` you pass. Errors if the route
+    crosses regions (one regional engine can't route it yet) — keep anchors within one US
+    region for now."""
     try:
         req = main.RoutePlanRequest(
             day_anchors=[main.DayAnchor(**a) for a in day_anchors],

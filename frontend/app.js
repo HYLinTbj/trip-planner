@@ -322,8 +322,12 @@ function drawPool() {
     lastPlan.dropped.forEach((d) => inPlan.add(d.poi_id));
   }
   allPois.forEach((p) => {
-    metaOf[p.id] = { name: p.name };
-    if (inPlan.has(p.id)) return;
+    // Route plans identify pooled POIs by a city-qualified id (store.pool_poi_id); base
+    // plans use the bare library id. Match the plan's namespace so "already routed" POIs
+    // aren't redrawn as pending.
+    const planId = routeMode ? `${currentCity}:${p.id}` : p.id;
+    metaOf[planId] = { name: p.name };
+    if (inPlan.has(planId)) return;
     const tags = (p.tags || []).join(", ");
     L.marker([p.lat, p.lon], { icon: poolIcon() }).addTo(poolLayer).bindPopup(
       `<b>${esc(p.name)}</b>${tags ? `<br><span class="muted">${esc(tags)}</span>` : ""}` +

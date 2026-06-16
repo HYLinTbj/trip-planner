@@ -75,6 +75,8 @@ def plan_trip(
       happen to share coordinates. A single-base trip = every anchor at the base.
     """
     locks = locks or []
+    if not day_anchors:
+        return _infeasible("A trip needs at least one day.", [], day_start, day_end)
     num_days = len(day_anchors)
     n_anchor = 1 + max(max(s, e) for s, e in day_anchors)   # anchors occupy 0..n_anchor-1
 
