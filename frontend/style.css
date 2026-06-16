@@ -150,3 +150,25 @@ details.sec[open] > summary { margin-bottom: 8px; }
 button.save { background: #137333; }
 button.danger { background: #fdecea; color: #b9220b; }
 button:disabled { opacity: .55; cursor: default; filter: none; }
+
+/* --- route mode (HYL-68): per-day anchors --- */
+.route-toggle { display: flex; align-items: center; gap: 7px; font-size: 12px; color: #444;
+  margin: 2px 0 10px; cursor: pointer; }
+.route-toggle input { flex: 0 0 auto; }
+#route-panel { border: 1px solid #d9e2ff; background: #f7f9ff; border-radius: 6px;
+  padding: 10px; margin-bottom: 10px; }
+.wp-search { margin-bottom: 8px; }
+.wp-search .results { position: absolute; left: 0; right: 0; z-index: 1000; background: #fff;
+  box-shadow: 0 4px 12px rgba(0,0,0,.14); }
+.waypoints { list-style: none; counter-reset: wp; margin: 0; padding: 0; }
+.wp { counter-increment: wp; display: flex; align-items: center; gap: 6px; font-size: 12px;
+  padding: 5px 6px; background: #fff; border: 1px solid #e6ebff; border-radius: 4px; margin: 4px 0; }
+.wp::before { content: counter(wp); flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
+  background: #3367d6; color: #fff; font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; }
+.wp-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wp-ctl { flex: 0 0 auto; display: flex; gap: 3px; }
+.wp-ctl button { flex: 0 0 auto; padding: 1px 6px; font-size: 11px; background: #eef0f5; color: #333; }
+.wp-pin { width: 28px; height: 28px; border-radius: 6px; background: #8a2be2; color: #fff;
+  font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: center;
+  border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
