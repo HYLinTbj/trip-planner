@@ -25,7 +25,12 @@ def inflate_travel(m: list[list[int]], pct: int = 0, floor_min: int = 0) -> list
     invents travel between a day's co-located start/end anchors nor revives a dead arc. The
     cushion is reorder-safe — it rides on every transition the solver picks. Applied to the
     matrix before the solve so the objective, the Time dimension, and the reported travel are
-    all consistent. A no-op (returns the input) when both knobs are zero."""
+    all consistent. A no-op (returns the input) when both knobs are zero.
+
+    Note: the inflated matrix also feeds the arc-cost objective, so a flat `floor_min` adds a
+    fixed cost to *every* leg — mildly favoring fewer hops and, at the margin, able to shed a
+    low-value POI via its disjunction penalty even when the day still has clock time for it.
+    `pct` scales uniformly (roughly order-preserving); the flat floor does not."""
     if not pct and not floor_min:
         return m
     return [
@@ -33,6 +38,7 @@ def inflate_travel(m: list[list[int]], pct: int = 0, floor_min: int = 0) -> list
          for v in row]
         for row in m
     ]
+
 
 # Modes where A->B and B->A are essentially the same trip (no one-way streets).
 _SYMMETRIC = {"foot", "bicycle"}

@@ -201,7 +201,7 @@ def test_update_route_to_base_clears_anchors_and_pool(db):
     _seed_denver_boulder(db)
     tid = main.create_trip(main.TripCreate(
         city="denver", title="RT", mode="route", day_anchors=[main.DayAnchor(**_ANCHOR)],
-        poi_refs=[main.POIRef(city="denver", id="museum")], result=_BUF_CANNED), db)["id"]
+        poi_refs=[main.POIRef(city="denver", id="museum")], result=_CANNED), db)["id"]
     assert store.load_day_anchors(tid, db) and store.load_trip_pool(tid, db)   # present first
 
     base_canned = {"feasible": True, "total_travel_min": 1, "dropped": [],
