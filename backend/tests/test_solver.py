@@ -1,8 +1,10 @@
 """Unit tests for the OR-Tools TTDP core (solver.plan_trip + helpers).
 
-plan_trip now takes per-day (start, end) anchors. Most cases here are **single-base**
-(every anchor co-located at the base, built by `base_line`) — that's the backward-compat
-path. The `test_route_*` cases exercise distinct per-day start/end anchors (HYL-68).
+plan_trip takes per-day (start, end) anchors and per-day time windows (HYL-69). Most
+cases here are **single-base** (every anchor co-located at the base, built by `base_line`)
+with **uniform** windows — that's the common path. The `test_route_*` cases exercise
+distinct per-day start/end anchors (HYL-68); the `test_per_day_*` cases exercise distinct
+per-day windows (HYL-69).
 
 Tiny hand-built matrices solve instantly, so every plan uses time_limit_s=1. Days run
 09:00-19:00 (540-1140 minutes from midnight) unless a case needs otherwise.
@@ -10,7 +12,7 @@ Tiny hand-built matrices solve instantly, so every plan uses time_limit_s=1. Day
 
 from app.models import Lock
 from app.solver import _window, hhmm_to_min, min_to_hhmm, plan_trip
-from tests.conftest import base_line, make_poi, matrix_from_positions
+from tests.conftest import base_line, make_poi, matrix_from_positions, uniform_windows
 
 DAY_START, DAY_END = 540, 1140  # 09:00 - 19:00
 
@@ -55,12 +57,12 @@ def test_window_infeasible_when_dwell_exceeds_opening_span():
     assert high < low                 # signals "can't fit" to plan_trip
 
 
-# --- basic solve (single base) -----------------------------------------------
+# --- basic solve (single base, uniform windows) ------------------------------
 
 def test_basic_feasible_visits_all():
     pois = [make_poi(x, dwell_min=30) for x in ("a", "b", "c")]
-    anchors, m = base_line(1, [1, 2, 3])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1)
+    anchors, win, m = base_line(1, [1, 2, 3])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1)
 
     assert res["feasible"] is True
     assert res["reason"] is None
@@ -74,6 +76,14 @@ def test_basic_feasible_visits_all():
             assert s["departure"] == s["arrival"] + s["dwell"]
 
 
+def test_result_has_no_top_level_day_window():
+    # HYL-69: per-day windows live on each day (attached by main), not a single envelope.
+    pois = [make_poi("a", dwell_min=30)]
+    anchors, win, m = base_line(1, [1])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1)
+    assert "day_start" not in res and "day_end" not in res
+
+
 def test_drop_penalty_sheds_lowest_importance():
     # 3 * 250-min dwells can't share one 10h day -> the cheapest (low importance) is shed.
     pois = [
@@ -81,8 +91,8 @@ def test_drop_penalty_sheds_lowest_importance():
         make_poi("b", importance=0.9, dwell_min=250),
         make_poi("c", importance=0.1, dwell_min=250),
     ]
-    anchors, m = base_line(1, [1, 2, 3])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1)
+    anchors, win, m = base_line(1, [1, 2, 3])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1)
     assert res["feasible"] is True
     assert res["dropped"] == ["c"]
     visited = {s["poi_id"] for d in res["days"] for s in d["stops"]}
@@ -94,8 +104,8 @@ def test_auto_dropped_when_opening_too_short():
         make_poi("ok", dwell_min=30),
         make_poi("tiny", dwell_min=60, hours={"default": {"open": "09:00", "close": "09:10"}}),
     ]
-    anchors, m = base_line(1, [1, 2])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1)
+    anchors, win, m = base_line(1, [1, 2])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1)
     assert res["feasible"] is True
     assert res["auto_dropped"] == ["tiny"]
     visited = {s["poi_id"] for d in res["days"] for s in d["stops"]}
@@ -106,8 +116,8 @@ def test_auto_dropped_when_opening_too_short():
 
 def test_exclude_lock_removes_from_pool():
     pois = [make_poi("a", dwell_min=30), make_poi("b", dwell_min=30)]
-    anchors, m = base_line(1, [1, 2])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1,
+    anchors, win, m = base_line(1, [1, 2])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
                     locks=[Lock(poi_id="b", type="exclude")])
     assert res["feasible"] is True
     visited = {s["poi_id"] for d in res["days"] for s in d["stops"]}
@@ -123,11 +133,11 @@ def test_include_lock_forces_low_importance_visit():
         make_poi("b", importance=0.9, dwell_min=250),
         make_poi("c", importance=0.1, dwell_min=250),
     ]
-    anchors, m = base_line(1, [1, 2, 3])
+    anchors, win, m = base_line(1, [1, 2, 3])
     # baseline: c is shed
-    assert plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1)["dropped"] == ["c"]
+    assert plan_trip(pois, m, anchors, win, time_limit_s=1)["dropped"] == ["c"]
     # include forces c in (one of the high-value POIs is shed instead)
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1,
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
                     locks=[Lock(poi_id="c", type="include")])
     assert res["feasible"] is True
     visited = {s["poi_id"] for d in res["days"] for s in d["stops"]}
@@ -137,8 +147,8 @@ def test_include_lock_forces_low_importance_visit():
 
 def test_day_lock_pins_to_day():
     pois = [make_poi(x, dwell_min=30) for x in ("a", "b", "c", "d")]
-    anchors, m = base_line(2, [1, 2, 3, 4])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1,
+    anchors, win, m = base_line(2, [1, 2, 3, 4])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
                     locks=[Lock(poi_id="a", type="day", day=1)])
     assert res["feasible"] is True
     day_of = {s["poi_id"]: di for di, d in enumerate(res["days"]) for s in d["stops"]}
@@ -147,8 +157,8 @@ def test_day_lock_pins_to_day():
 
 def test_pin_lock_fixes_arrival():
     pois = [make_poi("a", dwell_min=30), make_poi("b", dwell_min=30)]
-    anchors, m = base_line(1, [1, 2])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1,
+    anchors, win, m = base_line(1, [1, 2])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
                     locks=[Lock(poi_id="a", type="pin", day=0, time="11:00")])
     assert res["feasible"] is True
     stop_a = next(s for d in res["days"] for s in d["stops"] if s["poi_id"] == "a")
@@ -162,8 +172,8 @@ def test_infeasible_include_unfittable_poi():
         make_poi("ok", dwell_min=30),
         make_poi("tiny", dwell_min=60, hours={"default": {"open": "09:00", "close": "09:10"}}),
     ]
-    anchors, m = base_line(1, [1, 2])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1,
+    anchors, win, m = base_line(1, [1, 2])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
                     locks=[Lock(poi_id="tiny", type="include")])
     assert res["feasible"] is False
     assert "tiny" in res["reason"]
@@ -173,8 +183,8 @@ def test_infeasible_include_unfittable_poi():
 
 def test_infeasible_pin_outside_window():
     pois = [make_poi("a", dwell_min=30)]
-    anchors, m = base_line(1, [1])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, time_limit_s=1,
+    anchors, win, m = base_line(1, [1])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
                     locks=[Lock(poi_id="a", type="pin", day=0, time="05:00")])
     assert res["feasible"] is False
     assert "a" in res["reason"]
@@ -185,8 +195,8 @@ def test_infeasible_pin_outside_window():
 
 def test_balance_avoids_a_dead_day():
     pois = [make_poi(x, dwell_min=60) for x in ("a", "b", "c", "d")]
-    anchors, m = base_line(2, [1, 2, 3, 4])
-    res = plan_trip(pois, m, anchors, DAY_START, DAY_END, balance=100, time_limit_s=1)
+    anchors, win, m = base_line(2, [1, 2, 3, 4])
+    res = plan_trip(pois, m, anchors, win, balance=100, time_limit_s=1)
     assert res["feasible"] is True
     counts = [len(d["stops"]) for d in res["days"]]
     assert sum(counts) == 4
@@ -200,7 +210,7 @@ def test_route_two_legs_assigns_pois_by_proximity():
     pois = [make_poi("pa", dwell_min=30), make_poi("pc", dwell_min=30)]
     positions = [0, 10, 10, 20] + [5, 15]   # 2 anchors/day; pa@5 (A-B), pc@15 (B-C)
     m = matrix_from_positions(positions, gap=10)
-    res = plan_trip(pois, m, [(0, 1), (2, 3)], DAY_START, DAY_END, time_limit_s=1)
+    res = plan_trip(pois, m, [(0, 1), (2, 3)], uniform_windows(2), time_limit_s=1)
 
     assert res["feasible"] is True
     day_of = {s["poi_id"]: di for di, d in enumerate(res["days"]) for s in d["stops"]}
@@ -210,7 +220,7 @@ def test_route_two_legs_assigns_pois_by_proximity():
 def test_route_day_with_no_pois_is_direct_leg():
     # One day from A(0) to C(20), no POIs -> the day is just the direct anchor-to-anchor leg.
     m = matrix_from_positions([0, 20], gap=10)
-    res = plan_trip([], m, [(0, 1)], DAY_START, DAY_END, time_limit_s=1)
+    res = plan_trip([], m, [(0, 1)], uniform_windows(1), time_limit_s=1)
     assert res["feasible"] is True
     assert res["days"][0]["stops"] == []
     assert res["days"][0]["travel_min"] == 200    # |0-20| * 10
@@ -218,6 +228,71 @@ def test_route_day_with_no_pois_is_direct_leg():
 
 def test_no_day_anchors_is_gracefully_infeasible():
     # No days at all -> a graceful feasible:false, not a ValueError from max() of an empty seq.
-    res = plan_trip([make_poi("a")], [], [], DAY_START, DAY_END, time_limit_s=1)
+    res = plan_trip([make_poi("a")], [], [], [], time_limit_s=1)
     assert res["feasible"] is False
     assert res["days"] == []
+
+
+# --- HYL-69: per-day time windows --------------------------------------------
+
+def test_per_day_poi_lands_on_the_day_whose_window_fits():
+    # "m" opens 10:00-12:00 (dwell 60): fits day 0 (09-19) but not day 1 (14-18).
+    pois = [make_poi("m", dwell_min=60, hours={"default": {"open": "10:00", "close": "12:00"}})]
+    anchors, _, m = base_line(2, [1])
+    res = plan_trip(pois, m, anchors, [(540, 1140), (840, 1080)], time_limit_s=1)
+    assert res["feasible"] is True
+    day_of = {s["poi_id"]: di for di, d in enumerate(res["days"]) for s in d["stops"]}
+    assert day_of["m"] == 0
+
+
+def test_per_day_poi_kept_when_it_fits_only_one_day():
+    # A 2h-dwell POI (no hours) fits day 0's long window but not day 1's 1-hour window —
+    # it must NOT be auto-dropped (it fits a day), and lands on day 0.
+    pois = [make_poi("big", dwell_min=120)]
+    anchors, _, m = base_line(2, [1])
+    res = plan_trip(pois, m, anchors, [(540, 1140), (540, 600)], time_limit_s=1)
+    assert res["feasible"] is True
+    assert res["auto_dropped"] == []
+    day_of = {s["poi_id"]: di for di, d in enumerate(res["days"]) for s in d["stops"]}
+    assert day_of["big"] == 0
+
+
+def test_per_day_auto_dropped_only_when_no_day_fits():
+    # A 3h-dwell POI fits neither a 2h day nor a 1h day -> auto-dropped (no day holds it).
+    pois = [make_poi("huge", dwell_min=180)]
+    anchors, _, m = base_line(2, [1])
+    res = plan_trip(pois, m, anchors, [(540, 660), (540, 600)], time_limit_s=1)
+    assert res["feasible"] is True
+    assert res["auto_dropped"] == ["huge"]
+
+
+def test_per_day_day_lock_to_a_day_that_cant_fit_is_infeasible():
+    # "big" (2h dwell) locked to day 1, which is only 09:00-10:00 -> graceful infeasible.
+    pois = [make_poi("big", dwell_min=120), make_poi("ok", dwell_min=30)]
+    anchors, _, m = base_line(2, [1, 2])
+    res = plan_trip(pois, m, anchors, [(540, 1140), (540, 600)], time_limit_s=1,
+                    locks=[Lock(poi_id="big", type="day", day=1)])
+    assert res["feasible"] is False
+    assert "big" in res["reason"]
+    assert "big" in res["auto_dropped"]
+
+
+def test_per_day_pin_valid_on_its_locked_day_despite_other_windows():
+    # Pin "a" to 13:00 on day 0 (open all day). Day 1 is 09:00-11:00 — 13:00 is outside it,
+    # but a pin only has to fit its own day, so the solve stays feasible.
+    pois = [make_poi("a", dwell_min=30), make_poi("b", dwell_min=30)]
+    anchors, _, m = base_line(2, [1, 2])
+    res = plan_trip(pois, m, anchors, [(540, 1140), (540, 660)], time_limit_s=1,
+                    locks=[Lock(poi_id="a", type="pin", day=0, time="13:00")])
+    assert res["feasible"] is True
+    stop_a = next(s for d in res["days"] for s in d["stops"] if s["poi_id"] == "a")
+    assert stop_a["arrival"] == hhmm_to_min("13:00")
+
+
+def test_per_day_short_day_caps_the_return_time():
+    # Day 1's 09:00-11:00 window must bound that day's end cumul (return) at <= 11:00.
+    pois = [make_poi(x, dwell_min=30) for x in ("a", "b", "c")]
+    anchors, _, m = base_line(2, [1, 2, 3])
+    res = plan_trip(pois, m, anchors, [(540, 1140), (540, 660)], time_limit_s=1)
+    assert res["feasible"] is True
+    assert res["days"][1]["return_min"] <= 660

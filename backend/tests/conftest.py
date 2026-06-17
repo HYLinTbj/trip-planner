@@ -37,11 +37,19 @@ def matrix_from_positions(positions: list[float], gap: int = 10) -> list[list[in
     return [[int(abs(a - b) * gap) for b in positions] for a in positions]
 
 
-def base_line(num_days: int, poi_positions: list[float], gap: int = 10):
-    """(day_anchors, matrix) for a single-base trip on a line: the base (position 0)
-    duplicated into 2*num_days co-located anchor nodes, then POIs at `poi_positions`
-    (same order as the `pois` list passed to plan_trip). Mirrors how main._run lays out
-    a base-mode solve — every day starts and ends at the base."""
+def uniform_windows(num_days: int, start: int = 540, end: int = 1140) -> list[tuple[int, int]]:
+    """A `day_windows` list (HYL-69) where every day shares one (start, end) window —
+    the same-hours-every-day case. Defaults to 09:00-19:00."""
+    return [(start, end)] * num_days
+
+
+def base_line(num_days: int, poi_positions: list[float], gap: int = 10,
+              start: int = 540, end: int = 1140):
+    """(day_anchors, day_windows, matrix) for a single-base trip on a line: the base
+    (position 0) duplicated into 2*num_days co-located anchor nodes, then POIs at
+    `poi_positions` (same order as the `pois` list passed to plan_trip), plus a uniform
+    per-day window list. Mirrors how main._run lays out a base-mode solve — every day
+    starts and ends at the base, with the same hours unless overridden."""
     day_anchors = [(2 * i, 2 * i + 1) for i in range(num_days)]
     positions = [0.0] * (2 * num_days) + list(poi_positions)
-    return day_anchors, matrix_from_positions(positions, gap)
+    return day_anchors, uniform_windows(num_days, start, end), matrix_from_positions(positions, gap)

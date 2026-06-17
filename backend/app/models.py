@@ -55,6 +55,14 @@ class DayAnchor(BaseModel):
     end_name: Optional[str] = None
 
 
+class DayWindow(BaseModel):
+    """HYL-69: one day's own active hours (start/end, "HH:MM"). A trip carries one per day;
+    a same-hours-every-day trip just repeats the global default. Validated where it enters
+    the solve (the API checks count + start < end)."""
+    start: str   # "HH:MM"
+    end: str     # "HH:MM"
+
+
 class POICreate(BaseModel):
     """Inbound payload for adding a POI to the library (the id is server-assigned).
 

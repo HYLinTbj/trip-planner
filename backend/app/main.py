@@ -25,7 +25,7 @@ from .engine import DEFAULT_PROFILE, base_url as engine_base_url, table_duration
 from .geocode import reverse as geocode_reverse, search as geocode_search
 from .llm import LLMNotConfigured, propose_candidates
 from .matrix import get_matrix_min
-from .models import DayAnchor, Lock, POICreate, SuggestRequest
+from .models import DayAnchor, DayWindow, Lock, POICreate, SuggestRequest
 from .solver import hhmm_to_min, min_to_hhmm, plan_trip
 
 app = FastAPI(title="Trip Planner")
@@ -144,13 +144,36 @@ def matrix(city: str = DEFAULT_CITY, profile: str | None = None,
     }
 
 
-def _solve(pois, anchors, ds, de, balance, time_limit, profile, base_url, locks, base) -> dict:
-    """Core solve + map-shaping over per-day (start, end) anchors.
+def _day_windows_min(day_windows, start: str, end: str, num_days: int) -> list[tuple[int, int]]:
+    """Per-day (start_min, end_min) windows for the solver (HYL-69). An empty `day_windows`
+    expands the scalar `start`/`end` default to every day; otherwise there must be exactly
+    one entry per day and each must have start < end (422 on a bad shape)."""
+    if not day_windows:
+        return [(hhmm_to_min(start), hhmm_to_min(end))] * num_days
+    if len(day_windows) != num_days:
+        raise HTTPException(
+            status_code=422,
+            detail=f"day_windows needs exactly {num_days} "
+                   f"entr{'y' if num_days == 1 else 'ies'} (one per day); got {len(day_windows)}.")
+    out = []
+    for w in day_windows:
+        ds, de = hhmm_to_min(w.start), hhmm_to_min(w.end)
+        if ds >= de:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Each day window needs start before end (got {w.start}–{w.end}).")
+        out.append((ds, de))
+    return out
+
+
+def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, locks, base) -> dict:
+    """Core solve + map-shaping over per-day (start, end) anchors and per-day time windows.
 
     `anchors`: list of ((start_lat, start_lon, start_name), (end_lat, end_lon, end_name)),
-    one per day. `pois`: the candidate pool. `base`: (lat, lon) for a single-base trip,
-    else None. OR-Tools needs distinct start/end node indices, so each day's two anchors
-    are separate (possibly co-located) nodes 0..2*num_days-1, then the POIs.
+    one per day. `day_windows`: per-day (start_min, end_min), aligned with `anchors`. `pois`:
+    the candidate pool. `base`: (lat, lon) for a single-base trip, else None. OR-Tools needs
+    distinct start/end node indices, so each day's two anchors are separate (possibly
+    co-located) nodes 0..2*num_days-1, then the POIs.
     """
     by_id = {p.id: p for p in pois}
     anchor_coords = [(a[k][0], a[k][1]) for a in anchors for k in (0, 1)]
@@ -162,7 +185,7 @@ def _solve(pois, anchors, ds, de, balance, time_limit, profile, base_url, locks,
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Routing engine unreachable: {exc}") from exc
 
-    res = plan_trip(pois, matrix, day_anchors, ds, de, time_limit, balance=balance, locks=locks)
+    res = plan_trip(pois, matrix, day_anchors, day_windows, time_limit, balance=balance, locks=locks)
 
     def stop_out(s: dict) -> dict:
         p = by_id[s["poi_id"]]
@@ -175,13 +198,13 @@ def _solve(pois, anchors, ds, de, balance, time_limit, profile, base_url, locks,
     out = {
         "feasible": res.get("feasible", True),
         "reason": res.get("reason"),
-        "day_start": min_to_hhmm(ds),
-        "day_end": min_to_hhmm(de),
         "days": [
             {
                 "stops": [stop_out(s) for s in d["stops"]],
                 "return_hhmm": min_to_hhmm(d["return_min"]),
                 "travel_min": d["travel_min"],
+                "day_start": min_to_hhmm(day_windows[i][0]),
+                "day_end": min_to_hhmm(day_windows[i][1]),
                 "start": {"lat": anchors[i][0][0], "lon": anchors[i][0][1], "name": anchors[i][0][2]},
                 "end": {"lat": anchors[i][1][0], "lon": anchors[i][1][1], "name": anchors[i][1][2]},
             }
@@ -194,21 +217,26 @@ def _solve(pois, anchors, ds, de, balance, time_limit, profile, base_url, locks,
         ],
         "total_travel_min": res["total_travel_min"],
     }
-    if base is not None:                      # back-compat: base trips still expose "base"
+    if base is not None:                      # base trips still expose a single "base"
         out["base"] = {"lat": base[0], "lon": base[1]}
     return out
 
 
-def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, profile, locks) -> dict:
-    """Base-mode solve: one hotel — every day starts and ends at the base."""
+def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, profile, locks,
+         day_windows=None) -> dict:
+    """Base-mode solve: one hotel — every day starts and ends at the base. `day_windows`
+    (per-day (start_min, end_min)) defaults to the scalar start/end repeated for every day."""
     pois = list(store.load_pois(city, db).values())
     anchors = [((base_lat, base_lon, None), (base_lat, base_lon, None)) for _ in range(days)]
-    return _solve(pois, anchors, hhmm_to_min(start), hhmm_to_min(end), balance, time_limit,
+    win = day_windows or [(hhmm_to_min(start), hhmm_to_min(end))] * days
+    return _solve(pois, anchors, win, balance, time_limit,
                   profile, _engine_url(city, db), locks, base=(base_lat, base_lon))
 
 
-def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks) -> dict:
-    """Route-mode solve (HYL-68): per-day (start, end) anchors over a candidate `pois` pool.
+def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks,
+               day_windows=None) -> dict:
+    """Route-mode solve (HYL-68): per-day (start, end) anchors over a candidate `pois` pool,
+    with per-day time windows (HYL-69; defaults to the scalar start/end for every day).
     Rejects a trip whose anchors/POIs cross regions — one regional engine can't route it yet."""
     # Region comes from the anchors (where the trip goes). We deliberately don't reverse-
     # geocode every POI too (it'd be many Nominatim calls) — a POI outside the region simply
@@ -221,7 +249,8 @@ def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks) -
             detail=("Route must lie within one supported US region — its anchors span "
                     "regions or fall outside coverage (cross-region routing isn't supported yet)."),
         )
-    return _solve(pois, anchors, hhmm_to_min(start), hhmm_to_min(end), balance, time_limit,
+    win = day_windows or [(hhmm_to_min(start), hhmm_to_min(end))] * len(anchors)
+    return _solve(pois, anchors, win, balance, time_limit,
                   profile, engine_base_url(region=region), locks, base=None)
 
 
@@ -248,13 +277,15 @@ class ReplanRequest(BaseModel):
     time_limit: int = 3
     profile: str | None = None
     locks: list[Lock] = []
+    day_windows: list[DayWindow] = []   # HYL-69: per-day overrides; empty = uniform start/end
 
 
 @app.post("/replan")
 def replan(req: ReplanRequest, db: Session = Depends(get_session)) -> dict:
     """Re-optimize honoring the user's locks — the 'you dispose' step."""
+    win = _day_windows_min(req.day_windows, req.start, req.end, req.days)
     return _run(req.city, db, req.days, req.start, req.end, req.base_lat, req.base_lon,
-                req.balance, req.time_limit, req.profile, req.locks)
+                req.balance, req.time_limit, req.profile, req.locks, win)
 
 
 class POIRef(BaseModel):
@@ -275,6 +306,7 @@ class RoutePlanRequest(BaseModel):
     time_limit: int = 3
     profile: str | None = None
     locks: list[Lock] = []
+    day_windows: list[DayWindow] = []   # HYL-69: per-day overrides; empty = uniform start/end
 
 
 @app.post("/plan-route")
@@ -286,8 +318,9 @@ def plan_route(req: RoutePlanRequest, db: Session = Depends(get_session)) -> dic
     pois = store.load_pois_by_refs([(r.city, r.id) for r in req.poi_refs], db)
     anchors = [((a.start_lat, a.start_lon, a.start_name), (a.end_lat, a.end_lon, a.end_name))
                for a in req.day_anchors]
+    win = _day_windows_min(req.day_windows, req.start, req.end, len(req.day_anchors))
     return _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
-                      req.profile, req.locks)
+                      req.profile, req.locks, win)
 
 
 # --- POI library: list / create / delete (the write path behind "add a POI") --
@@ -389,6 +422,7 @@ class TripCreate(BaseModel):
     mode: str = "base"                 # "base" | "route" (HYL-68)
     day_anchors: list[DayAnchor] = []  # route mode: per-day (start, end) anchors
     poi_refs: list[POIRef] = []        # route mode: the (city, id) candidate pool
+    day_windows: list[DayWindow] = []  # HYL-69: per-day overrides; empty = uniform start/end
 
 
 class TripPatch(BaseModel):
@@ -414,10 +448,12 @@ def _trip_out(t, stops) -> dict:
     read from the raw result snapshot."""
     result = t.result or {}
     res_days = result.get("days", [])
+    windows = t.day_windows or []        # HYL-69: per-day [start_min, end_min]
     days = []
     for di in range(t.num_days):
         day_stops = [s for s in stops if s.day_index == di]   # already itinerary-ordered
         rd = res_days[di] if di < len(res_days) else {}
+        dw = windows[di] if di < len(windows) else None
         days.append({
             "day_index": di,
             "date": (t.start_date + timedelta(days=di)).isoformat() if t.start_date else None,
@@ -430,13 +466,14 @@ def _trip_out(t, stops) -> dict:
             } for s in day_stops],
             "travel_min": rd.get("travel_min"),
             "return_hhmm": rd.get("return_hhmm"),
+            "day_start": min_to_hhmm(dw[0]) if dw else None,   # HYL-69: this day's own window
+            "day_end": min_to_hhmm(dw[1]) if dw else None,
             "start": rd.get("start"),    # route trips: per-day anchors (None for base trips)
             "end": rd.get("end"),
         })
     out = {
         **_trip_summary(t, sum(len(d["stops"]) for d in days)),
         "notes": t.notes,
-        "day_start": min_to_hhmm(t.day_start_min), "day_end": min_to_hhmm(t.day_end_min),
         "balance": t.balance,
         "days": days,
         "dropped": result.get("dropped", []),
@@ -456,19 +493,19 @@ def _route_solve_and_meta(req: "TripCreate", db: Session):
     pois = store.load_pois_by_refs([(r.city, r.id) for r in req.poi_refs], db)
     anchors = [((a.start_lat, a.start_lon, a.start_name), (a.end_lat, a.end_lon, a.end_name))
                for a in req.day_anchors]
+    win = _day_windows_min(req.day_windows, req.start, req.end, len(req.day_anchors))
     result = req.result
     # Solve now (this is where the within-region guard runs); a client-supplied result is
     # trusted as-is — same as base mode — since it came from a prior region-checked solve.
     if result is None:   # the server's plan is the source of truth
         result = _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
-                            req.profile, req.locks)
+                            req.profile, req.locks, win)
         if not result.get("feasible", True):
             raise HTTPException(status_code=422,
                                 detail=f"Solve infeasible — nothing saved: {result.get('reason')}")
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
-                num_days=len(req.day_anchors), day_start_min=hhmm_to_min(req.start),
-                day_end_min=hhmm_to_min(req.end), profile=req.profile, balance=req.balance,
-                mode="route", base_lat=None, base_lon=None)
+                num_days=len(req.day_anchors), day_windows=[list(w) for w in win],
+                profile=req.profile, balance=req.balance, mode="route", base_lat=None, base_lon=None)
     return meta, result, [a.model_dump() for a in req.day_anchors], [(r.city, r.id) for r in req.poi_refs]
 
 
@@ -486,16 +523,17 @@ def create_trip(req: TripCreate, db: Session = Depends(get_session)) -> dict:
             raise HTTPException(status_code=404, detail=f"Unknown city '{req.city}'")
         base_lat = c.base_lat if base_lat is None else base_lat
         base_lon = c.base_lon if base_lon is None else base_lon
+    win = _day_windows_min(req.day_windows, req.start, req.end, req.days)
     result = req.result
     if result is None:   # solve now — the server's plan is the source of truth
         result = _run(req.city, db, req.days, req.start, req.end, base_lat, base_lon,
-                      req.balance, req.time_limit, req.profile, req.locks)
+                      req.balance, req.time_limit, req.profile, req.locks, win)
         if not result.get("feasible", True):
             raise HTTPException(status_code=422,
                                 detail=f"Solve infeasible — nothing saved: {result.get('reason')}")
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
-                num_days=req.days, day_start_min=hhmm_to_min(req.start),
-                day_end_min=hhmm_to_min(req.end), profile=req.profile, balance=req.balance,
+                num_days=req.days, day_windows=[list(w) for w in win],
+                profile=req.profile, balance=req.balance,
                 mode="base", base_lat=base_lat, base_lon=base_lon)
     trip = store.save_trip(req.city, meta, [lk.model_dump() for lk in req.locks], result, db)
     return _trip_out(trip, store.trip_stops(trip.id, db))
@@ -539,16 +577,17 @@ def update_trip(trip_id: int, req: TripCreate, db: Session = Depends(get_session
         return _trip_out(t, store.trip_stops(trip_id, db))
     base_lat = t.base_lat if req.base_lat is None else req.base_lat
     base_lon = t.base_lon if req.base_lon is None else req.base_lon
+    win = _day_windows_min(req.day_windows, req.start, req.end, req.days)
     result = req.result
     if result is None:
         result = _run(t.city_slug, db, req.days, req.start, req.end, base_lat, base_lon,
-                      req.balance, req.time_limit, req.profile, req.locks)
+                      req.balance, req.time_limit, req.profile, req.locks, win)
         if not result.get("feasible", True):
             raise HTTPException(status_code=422,
                                 detail=f"Solve infeasible — trip unchanged: {result.get('reason')}")
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
-                num_days=req.days, day_start_min=hhmm_to_min(req.start),
-                day_end_min=hhmm_to_min(req.end), profile=req.profile, balance=req.balance,
+                num_days=req.days, day_windows=[list(w) for w in win],
+                profile=req.profile, balance=req.balance,
                 mode="base", base_lat=base_lat, base_lon=base_lon)
     # Pass empty anchors/pool so a trip switched route -> base drops its stale route rows.
     store.update_trip(t, meta, [lk.model_dump() for lk in req.locks], result, db,
@@ -565,17 +604,18 @@ def reoptimize_trip(trip_id: int, time_limit: int = 3,
     if t is None:
         raise HTTPException(status_code=404, detail=f"No trip {trip_id}")
     locks = [Lock(**lk) for lk in (t.locks or [])]
+    win = [tuple(w) for w in (t.day_windows or [])]   # HYL-69: the stored per-day windows
+    s_hhmm = min_to_hhmm(win[0][0]) if win else "09:00"   # fallback start/end (unused when win set)
+    e_hhmm = min_to_hhmm(win[0][1]) if win else "19:00"
     if t.mode == "route":
         rows = store.load_day_anchors(t.id, db)
         anchors = [((r.start_lat, r.start_lon, r.start_name), (r.end_lat, r.end_lon, r.end_name))
                    for r in rows]
-        result = _run_route(store.load_trip_pool(t.id, db), anchors,
-                            min_to_hhmm(t.day_start_min), min_to_hhmm(t.day_end_min),
-                            t.balance, time_limit, t.profile, locks)
+        result = _run_route(store.load_trip_pool(t.id, db), anchors, s_hhmm, e_hhmm,
+                            t.balance, time_limit, t.profile, locks, win)
     else:
-        result = _run(t.city_slug, db, t.num_days, min_to_hhmm(t.day_start_min),
-                      min_to_hhmm(t.day_end_min), t.base_lat, t.base_lon,
-                      t.balance, time_limit, t.profile, locks)
+        result = _run(t.city_slug, db, t.num_days, s_hhmm, e_hhmm, t.base_lat, t.base_lon,
+                      t.balance, time_limit, t.profile, locks, win)
     if not result.get("feasible", True):
         raise HTTPException(status_code=422,
                             detail=f"Re-solve infeasible — trip unchanged: {result.get('reason')}")

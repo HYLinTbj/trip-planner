@@ -31,6 +31,7 @@ const cityMap = {};        // slug -> { label, base, has_transit, transit_operat
 let currentTrip = null;    // null = unsaved draft; else { id, title, status, start_date, notes }
 let routeMode = false;     // HYL-68: per-day start/end anchors instead of one base
 let waypoints = [];        // [{name, lat, lon}] ordered; day i = waypoints[i] -> waypoints[i+1]
+let dayWindows = [];       // HYL-69: [{start,end}] per day, used when "customize each day" is on
 
 // Every POI/plan endpoint is city-scoped; append the picker's city to the query.
 const cityQ = () => (currentCity ? "?city=" + encodeURIComponent(currentCity) : "");
@@ -79,10 +80,62 @@ function waypointAnchors() {   // the waypoint chain -> per-day (start, end) anc
 }
 const tripPoiRefs = () => allPois.map((p) => ({ city: currentCity, id: p.id }));
 
+// ===== Per-day hours (HYL-69): one start/end per day, layered over the global default ====
+const perDayOn = () => $("perday") && $("perday").checked;
+const dayCount = () => routeMode ? Math.max(1, waypoints.length - 1) : Math.max(1, +val("days") || 1);
+const HHMM = /^\d{1,2}:\d{2}$/;
+
+// Resize dayWindows to the current day count, seeding any new rows from the global start/end.
+function syncDayWindows() {
+  const n = dayCount();
+  if (dayWindows.length > n) dayWindows.length = n;
+  while (dayWindows.length < n) dayWindows.push({ start: val("start"), end: val("end") });
+}
+
+function renderDayWindows() {
+  const ol = $("day-windows");
+  if (!ol) return;
+  ol.innerHTML = dayWindows.map((w, i) => `
+    <li class="dw">
+      <span class="dw-day">Day ${i + 1}</span>
+      <input class="dw-start" data-i="${i}" value="${esc(w.start)}" />
+      <span class="dw-sep">–</span>
+      <input class="dw-end" data-i="${i}" value="${esc(w.end)}" />
+    </li>`).join("");
+  ol.querySelectorAll(".dw-start").forEach((el) =>
+    el.addEventListener("input", () => { dayWindows[+el.dataset.i].start = el.value.trim(); }));
+  ol.querySelectorAll(".dw-end").forEach((el) =>
+    el.addEventListener("input", () => { dayWindows[+el.dataset.i].end = el.value.trim(); }));
+}
+
+// Keep the editor in sync when it's visible and the day count changes.
+function refreshDayWindows() {
+  if (!perDayOn()) return;
+  syncDayWindows();
+  renderDayWindows();
+}
+
+// The day_windows payload for a solve/save: null when off, false on a bad HH:MM value.
+function dayWindowsPayload() {
+  if (!perDayOn()) return null;
+  syncDayWindows();
+  if (dayWindows.some((w) => !HHMM.test(w.start) || !HHMM.test(w.end))) return false;
+  return dayWindows.map((w) => ({ start: w.start, end: w.end }));
+}
+
+$("perday").addEventListener("change", () => {
+  const on = $("perday").checked;
+  $("perday-panel").hidden = !on;
+  if (on) { syncDayWindows(); renderDayWindows(); }
+});
+$("days").addEventListener("input", refreshDayWindows);
+
 function planRequest(useLocks) {
+  const dw = dayWindowsPayload();
   const common = {
     start: val("start"), end: val("end"), balance: +val("balance"),
     profile: val("profile"), time_limit: 1, locks: useLocks ? Object.values(locks) : [],
+    ...(dw ? { day_windows: dw } : {}),
   };
   if (routeMode) {
     return { url: "/plan-route", body: { ...common, day_anchors: waypointAnchors(), poi_refs: tripPoiRefs() } };
@@ -96,6 +149,9 @@ function planRequest(useLocks) {
 async function request(useLocks) {
   if (routeMode && waypoints.length < 2) {
     setStatus("Add at least 2 stops for a road trip (start + one more).", true); return;
+  }
+  if (dayWindowsPayload() === false) {
+    setStatus("Each day's hours must be HH:MM (e.g. 09:00).", true); return;
   }
   const { url, body } = planRequest(useLocks);
   setStatus("Planning…");
@@ -250,7 +306,7 @@ function renderTimeline(p) {
         : `<div class="muted">(free day)</div></div>`;
       return;
     }
-    h += `<div class="leg muted">${p.day_start} · leave ${from}</div>`;
+    h += `<div class="leg muted">${day.day_start} · leave ${from}</div>`;
     day.stops.forEach((s, si) => {
       const lk = locks[s.poi_id];
       const pinned = lk && lk.type === "pin";
@@ -671,6 +727,7 @@ function renderWaypoints() {
       </span>
     </li>`).join("");
   $("days").value = Math.max(1, waypoints.length - 1);   // keep the derived day count in sync
+  refreshDayWindows();                                   // HYL-69: re-seed per-day rows to match
 }
 window.wpMove = (i, d) => {
   const j = i + d;
@@ -755,11 +812,14 @@ function tripBody(title) {
     body.days = +val("days");
     body.base_lat = +val("blat"); body.base_lon = +val("blon");
   }
+  const dw = dayWindowsPayload();
+  if (dw) body.day_windows = dw;   // HYL-69: persist per-day hours when customizing
   return body;
 }
 
 async function saveCurrent(forceNew) {
   if (!lastPlan) { setStatus("Plan something first, then Save.", true); return; }
+  if (dayWindowsPayload() === false) { setStatus("Each day's hours must be HH:MM.", true); return; }
   const title = $("trip-title").value.trim() || "Untitled trip";
   const id = (!forceNew && currentTrip) ? currentTrip.id : null;
   setBusy(true); setStatus(id ? "Saving…" : "Saving trip…");
@@ -787,7 +847,9 @@ window.loadTrip = async (id) => {
     t = await res.json();
   } catch (e) { setStatus("Network error while loading.", true); setBusy(false); return; }
   setBusy(false);
-  $("start").value = t.day_start; $("end").value = t.day_end;
+  const wins = (t.days || []).map((d) => ({ start: d.day_start, end: d.day_end }));
+  const w0 = wins[0] || { start: "09:00", end: "19:00" };
+  $("start").value = w0.start; $("end").value = w0.end;
   $("profile").value = t.profile; $("balance").value = t.balance;
   if (t.mode === "route") {     // rebuild the route UI + waypoint chain from the saved anchors
     routeMode = true; $("routemode").checked = true; $("route-panel").hidden = false;
@@ -804,6 +866,12 @@ window.loadTrip = async (id) => {
     $("days").value = t.num_days;
     $("blat").value = t.base.lat; $("blon").value = t.base.lon;
   }
+  // HYL-69: restore per-day hours; reveal the editor only when days actually differ.
+  dayWindows = wins.map((w) => ({ start: w.start, end: w.end }));
+  const customized = wins.length > 0 && !wins.every((w) => w.start === w0.start && w.end === w0.end);
+  $("perday").checked = customized;
+  $("perday-panel").hidden = !customized;
+  if (customized) renderDayWindows();
   locks = {}; (t.locks || []).forEach((l) => { locks[l.poi_id] = l; });
   touched.clear();
   currentTrip = { id: t.id, title: t.title, status: t.status, start_date: t.start_date, notes: t.notes };

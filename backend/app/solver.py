@@ -1,10 +1,13 @@
 """Step 2–4: the scheduling core — Tourist Trip Design Problem via OR-Tools.
 
-Each day is a vehicle with its own start and end *anchor* (HYL-68): day i runs from
-anchor start_i to anchor end_i, picking up POIs along the way. Opening hours become
-time windows, dwell time becomes service time, and importance becomes a drop-penalty
-so low-value POIs are shed when a day can't hold everything. A single-base trip is the
-special case where every anchor shares the base's coordinates.
+Each day is a vehicle with its own start and end *anchor* (HYL-68) and its own
+*time window* (HYL-69): day i runs from anchor start_i to anchor end_i, between
+day_windows[i] = (open_min, close_min), picking up POIs along the way. Opening
+hours become time windows, dwell time becomes service time, and importance
+becomes a drop-penalty so low-value POIs are shed when a day can't hold
+everything. A single-base trip is the special case where every anchor shares the
+base's coordinates; a same-hours-every-day trip is the special case where every
+day repeats one window.
 
 Step 4 adds *locks* — the user's edits become hard constraints, then we
 re-solve around them:
@@ -35,7 +38,7 @@ def min_to_hhmm(m: int) -> str:
 
 def _window(poi: POI, day_start: int, day_end: int) -> tuple[int, int]:
     """Arrival-time window [low, high] so the visit fits within both the POI's
-    opening hours and the day. high < low means it can't fit at all."""
+    opening hours and the given day bounds. high < low means it can't fit at all."""
     if poi.hours:
         h = poi.hours.get("default") or next(iter(poi.hours.values()))
         open_m, close_m = hhmm_to_min(h.open), hhmm_to_min(h.close)
@@ -46,11 +49,11 @@ def _window(poi: POI, day_start: int, day_end: int) -> tuple[int, int]:
     return low, high
 
 
-def _infeasible(reason: str, auto_dropped: list[str], day_start: int, day_end: int) -> dict:
+def _infeasible(reason: str, auto_dropped: list[str]) -> dict:
     return {
         "feasible": False, "reason": reason,
         "days": [], "dropped": [], "auto_dropped": auto_dropped,
-        "total_travel_min": 0, "day_start": day_start, "day_end": day_end,
+        "total_travel_min": 0,
     }
 
 
@@ -58,13 +61,12 @@ def plan_trip(
     pois: list[POI],
     matrix_min: list[list[int]],
     day_anchors: list[tuple[int, int]],
-    day_start: int,
-    day_end: int,
+    day_windows: list[tuple[int, int]],
     time_limit_s: int = 5,
     balance: int = 0,
     locks: list[Lock] | None = None,
 ) -> dict:
-    """Solve an itinerary over per-day (start, end) anchors.
+    """Solve an itinerary over per-day (start, end) anchors with per-day time windows.
 
     matrix_min: square integer-minute matrix over [anchor nodes…, *pois] — anchor
       nodes occupy indices 0..A-1, POIs occupy A..A+len(pois)-1.
@@ -73,21 +75,49 @@ def plan_trip(
       start/end node indices to be distinct, so co-located anchors (a single base, or
       last night's hotel == this morning's start) are passed as distinct nodes that
       happen to share coordinates. A single-base trip = every anchor at the base.
+    day_windows: one (open_min, close_min) pair per day, aligned 1:1 with day_anchors
+      (minutes from midnight). Days may differ (HYL-69); a uniform trip just repeats one
+      window. The Time dimension's horizon spans min(open)..max(close), and each day's
+      own open/close is enforced on that day's start/end cumul — so a POI placed on a
+      short day still can't overrun it (no per-day POI windows needed).
     """
     locks = locks or []
     if not day_anchors:
-        return _infeasible("A trip needs at least one day.", [], day_start, day_end)
+        return _infeasible("A trip needs at least one day.", [])
     num_days = len(day_anchors)
     n_anchor = 1 + max(max(s, e) for s, e in day_anchors)   # anchors occupy 0..n_anchor-1
+    min_start = min(ds for ds, _ in day_windows)
+    max_end = max(de for _, de in day_windows)
 
     excluded = {lk.poi_id for lk in locks if lk.type == "exclude"}
     day_of = {lk.poi_id: lk.day for lk in locks if lk.type in ("day", "pin") and lk.day is not None}
     pin_of = {lk.poi_id: hhmm_to_min(lk.time) for lk in locks if lk.type == "pin" and lk.time}
     mandatory = {lk.poi_id for lk in locks if lk.type in ("day", "include", "pin")} - excluded
 
-    windows = {id(p): _window(p, day_start, day_end) for p in pois}
-    active = [p for p in pois if p.id not in excluded and windows[id(p)][1] >= windows[id(p)][0]]
-    auto_dropped = [p.id for p in pois if p.id not in excluded and windows[id(p)][1] < windows[id(p)][0]]
+    def candidate_days(poi_id: str):
+        """The day(s) a POI may land on: just its locked day (a day/pin lock with a valid
+        index), otherwise any day."""
+        d = day_of.get(poi_id)
+        if d is not None and 0 <= d < num_days:
+            return [d]
+        return range(num_days)
+
+    def fits_any(poi: POI) -> bool:
+        """True if the POI's hours fit within at least one of its candidate days' windows."""
+        for d in candidate_days(poi.id):
+            low, high = _window(poi, *day_windows[d])
+            if high >= low:
+                return True
+        return False
+
+    # A POI is schedulable if it fits at least one day it's allowed on; a day-locked POI
+    # that can't fit *its* day is reported (auto_dropped) and, if mandatory, fails below.
+    active, auto_dropped = [], []
+    for p in pois:
+        if p.id in excluded:
+            continue
+        (active if fits_any(p) else auto_dropped).append(p)
+    auto_dropped = [p.id for p in auto_dropped]
     active_ids = {p.id for p in active}
 
     missing = [pid for pid in mandatory if pid not in active_ids]
@@ -95,20 +125,23 @@ def plan_trip(
         return _infeasible(
             "Can't include locked stop(s) that are excluded or can't fit their hours: "
             + ", ".join(missing),
-            auto_dropped, day_start, day_end,
+            auto_dropped,
         )
 
-    # A pinned arrival time must land inside the POI's feasible window, else
+    # A pinned arrival time must land inside the POI's window *on its pinned day*, else
     # SetRange would throw on an out-of-domain value. Fail gracefully instead.
     active_by_id = {p.id: p for p in active}
-    bad_pins = [
-        pid for pid, t in pin_of.items()
-        if not (windows[id(active_by_id[pid])][0] <= t <= windows[id(active_by_id[pid])][1])
-    ]
+    bad_pins = []
+    for pid, t in pin_of.items():
+        d = day_of.get(pid)
+        dw = day_windows[d] if (d is not None and 0 <= d < num_days) else (min_start, max_end)
+        low, high = _window(active_by_id[pid], *dw)
+        if not (low <= t <= high):
+            bad_pins.append(pid)
     if bad_pins:
         return _infeasible(
             "Pinned arrival time is outside the day or opening hours for: " + ", ".join(bad_pins),
-            auto_dropped, day_start, day_end,
+            auto_dropped,
         )
 
     # Subset the matrix to [all anchor nodes] + [active POI nodes]; in the local matrix M
@@ -117,6 +150,10 @@ def plan_trip(
     idxs = list(range(n_anchor)) + [n_anchor + orig[id(p)] for p in active]
     M = [[matrix_min[i][j] for j in idxs] for i in idxs]
     n = len(active)
+
+    # POI cumul domain: the union window across the whole horizon. Each day's tighter
+    # close is enforced by that day's end cumul below, so this can stay loose.
+    windows = {id(p): _window(p, min_start, max_end) for p in active}
 
     starts = [s for s, _ in day_anchors]
     ends = [e for _, e in day_anchors]
@@ -138,7 +175,9 @@ def plan_trip(
         return dwell(f) + M[f][manager.IndexToNode(to_i)]
 
     time_idx = routing.RegisterTransitCallback(time_cb)
-    routing.AddDimension(time_idx, day_end - day_start, day_end, False, "Time")
+    # Horizon spans the widest day; each day's own open/close is set on its start/end
+    # cumul below (the single dimension capacity can't express per-day closes).
+    routing.AddDimension(time_idx, max_end - min_start, max_end, False, "Time")
     time_dim = routing.GetDimensionOrDie("Time")
 
     if balance and num_days > 1:
@@ -154,7 +193,11 @@ def plan_trip(
         routing.GetDimensionOrDie("Count").SetGlobalSpanCostCoefficient(balance)
 
     for v in range(num_days):
-        time_dim.CumulVar(routing.Start(v)).SetRange(day_start, day_end)
+        ds_v, de_v = day_windows[v]
+        # This day opens at ds_v and must be wrapped up by de_v — enforced on both its
+        # start and end cumul (the end bound is what closes a short day).
+        time_dim.CumulVar(routing.Start(v)).SetRange(ds_v, de_v)
+        time_dim.CumulVar(routing.End(v)).SetRange(ds_v, de_v)
 
     for k, poi in enumerate(active):
         node = n_anchor + k
@@ -179,7 +222,7 @@ def plan_trip(
     if sol is None:
         return _infeasible(
             "Couldn't fit all locked stops within the day limits — relax a lock or add a day.",
-            auto_dropped, day_start, day_end,
+            auto_dropped,
         )
 
     days = []
@@ -219,5 +262,5 @@ def plan_trip(
     return {
         "feasible": True, "reason": None,
         "days": days, "dropped": dropped, "auto_dropped": auto_dropped,
-        "total_travel_min": total_travel, "day_start": day_start, "day_end": day_end,
+        "total_travel_min": total_travel,
     }
