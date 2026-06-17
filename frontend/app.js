@@ -130,12 +130,27 @@ $("perday").addEventListener("change", () => {
 });
 $("days").addEventListener("input", refreshDayWindows);
 
+$("buffers-on").addEventListener("change", () => {
+  $("buffers-panel").hidden = !$("buffers-on").checked;
+});
+
+// HYL-72 contingency buffers. Always sent (defaulting to 0/no-op) so clearing them on a
+// loaded trip persists the clear; the toggle is just UI sugar for revealing the inputs.
+function buffersPayload() {
+  return {
+    travel_buffer_pct: Math.max(0, +val("buf-travel-pct") || 0),
+    travel_buffer_min: Math.max(0, +val("buf-travel-min") || 0),
+    stop_buffer_min: Math.max(0, +val("buf-stop-min") || 0),
+  };
+}
+
 function planRequest(useLocks) {
   const dw = dayWindowsPayload();
   const common = {
     start: val("start"), end: val("end"), balance: +val("balance"),
     profile: val("profile"), time_limit: 1, locks: useLocks ? Object.values(locks) : [],
     ...(dw ? { day_windows: dw } : {}),
+    ...buffersPayload(),
   };
   if (routeMode) {
     return { url: "/plan-route", body: { ...common, day_anchors: waypointAnchors(), poi_refs: tripPoiRefs() } };
@@ -814,6 +829,7 @@ function tripBody(title) {
   }
   const dw = dayWindowsPayload();
   if (dw) body.day_windows = dw;   // HYL-69: persist per-day hours when customizing
+  Object.assign(body, buffersPayload());   // HYL-72: persist contingency buffers
   return body;
 }
 
@@ -872,6 +888,13 @@ window.loadTrip = async (id) => {
   $("perday").checked = customized;
   $("perday-panel").hidden = !customized;
   if (customized) renderDayWindows();
+  // HYL-72: restore contingency buffers; reveal the editor only when any are set.
+  $("buf-travel-pct").value = t.travel_buffer_pct || 0;
+  $("buf-travel-min").value = t.travel_buffer_min || 0;
+  $("buf-stop-min").value = t.stop_buffer_min || 0;
+  const hasBuffers = (t.travel_buffer_pct || t.travel_buffer_min || t.stop_buffer_min) > 0;
+  $("buffers-on").checked = hasBuffers;
+  $("buffers-panel").hidden = !hasBuffers;
   locks = {}; (t.locks || []).forEach((l) => { locks[l.poi_id] = l; });
   touched.clear();
   currentTrip = { id: t.id, title: t.title, status: t.status, start_date: t.start_date, notes: t.notes };

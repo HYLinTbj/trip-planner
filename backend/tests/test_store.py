@@ -201,7 +201,7 @@ def test_update_route_to_base_clears_anchors_and_pool(db):
     _seed_denver_boulder(db)
     tid = main.create_trip(main.TripCreate(
         city="denver", title="RT", mode="route", day_anchors=[main.DayAnchor(**_ANCHOR)],
-        poi_refs=[main.POIRef(city="denver", id="museum")], result=_CANNED), db)["id"]
+        poi_refs=[main.POIRef(city="denver", id="museum")], result=_BUF_CANNED), db)["id"]
     assert store.load_day_anchors(tid, db) and store.load_trip_pool(tid, db)   # present first
 
     base_canned = {"feasible": True, "total_travel_min": 1, "dropped": [],
@@ -245,10 +245,53 @@ def test_reoptimize_base_passes_stored_day_windows(db, monkeypatch):
     captured = {}
 
     def fake_run(city, db, days, start, end, blat, blon, balance, tl, profile, locks,
-                 day_windows=None):
+                 day_windows=None, buffers=(0, 0, 0)):
         captured["win"] = day_windows
         return _TWO_DAY_CANNED
 
     monkeypatch.setattr(main, "_run", fake_run)
     main.reoptimize_trip(tid, db=db)
     assert captured["win"] == [(420, 660), (660, 1080)]   # the stored per-day windows, in minutes
+
+
+# --- HYL-72: contingency buffers persist + drive re-optimize -----------------------------
+
+_BUF_CANNED = {"feasible": True, "total_travel_min": 0, "dropped": [],
+               "days": [{"stops": [], "return_hhmm": "18:00", "travel_min": 0}]}
+
+
+def _buffer_trip(db):
+    store.add_city("Denver", 39.75, -104.99, "west", db)
+    return main.create_trip(main.TripCreate(
+        city="denver", title="BUF", mode="base", days=1, base_lat=39.75, base_lon=-104.99,
+        travel_buffer_pct=20, travel_buffer_min=5, stop_buffer_min=10,
+        result=_BUF_CANNED), db)
+
+
+def test_base_trip_persists_buffers(db):
+    out = _buffer_trip(db)
+    assert (out["travel_buffer_pct"], out["travel_buffer_min"], out["stop_buffer_min"]) == (20, 5, 10)
+    t = store.get_trip(out["id"], db)
+    assert (t.travel_buffer_pct, t.travel_buffer_min, t.stop_buffer_min) == (20, 5, 10)
+
+
+def test_buffers_default_to_zero_when_omitted(db):
+    store.add_city("Denver", 39.75, -104.99, "west", db)
+    out = main.create_trip(main.TripCreate(
+        city="denver", title="NB", mode="base", days=1, base_lat=39.75, base_lon=-104.99,
+        result=_BUF_CANNED), db)
+    assert (out["travel_buffer_pct"], out["travel_buffer_min"], out["stop_buffer_min"]) == (0, 0, 0)
+
+
+def test_reoptimize_base_passes_stored_buffers(db, monkeypatch):
+    tid = _buffer_trip(db)["id"]
+    captured = {}
+
+    def fake_run(city, db, days, start, end, blat, blon, balance, tl, profile, locks,
+                 day_windows=None, buffers=(0, 0, 0)):
+        captured["buffers"] = buffers
+        return _BUF_CANNED
+
+    monkeypatch.setattr(main, "_run", fake_run)
+    main.reoptimize_trip(tid, db=db)
+    assert captured["buffers"] == (20, 5, 10)   # the stored contingency triple

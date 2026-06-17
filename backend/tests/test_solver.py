@@ -296,3 +296,37 @@ def test_per_day_short_day_caps_the_return_time():
     res = plan_trip(pois, m, anchors, [(540, 1140), (540, 660)], time_limit_s=1)
     assert res["feasible"] is True
     assert res["days"][1]["return_min"] <= 660
+
+
+# --- HYL-72 per-stop contingency buffer --------------------------------------
+
+def _arrivals(res):
+    return {s["poi_id"]: s["arrival"] for d in res["days"] for s in d["stops"]}
+
+def test_stop_buffer_delays_later_stops_but_not_the_visit_duration():
+    # Two co-linear POIs visited a->b from the base. A per-stop buffer reserves time AFTER
+    # each visit, so the *second* stop's arrival shifts by the buffer while the first is
+    # unchanged; the visit duration (departure - arrival == dwell) never changes.
+    pois = [make_poi(x, dwell_min=30) for x in ("a", "b")]
+    anchors, win, m = base_line(1, [1, 2])
+
+    base = plan_trip(pois, m, anchors, win, time_limit_s=1)
+    padded = plan_trip(pois, m, anchors, win, time_limit_s=1, stop_buffer_min=15)
+
+    a0, a1 = _arrivals(base), _arrivals(padded)
+    assert a1["a"] == a0["a"]            # first stop: nothing reserved before it
+    assert a1["b"] == a0["b"] + 15       # buffer after 'a' pushes 'b' later by exactly 15
+    for d in padded["days"]:
+        for s in d["stops"]:
+            assert s["departure"] == s["arrival"] + s["dwell"]   # visit length unchanged
+
+def test_stop_buffer_does_not_shrink_opening_window():
+    # 'm' fits its 09:00-10:00 window exactly (dwell 60, co-located with base so arrival=540).
+    # A large per-stop buffer reserves time *after* the visit but must NOT tighten the window
+    # — unlike bumping dwell, which would auto-drop it. So 'm' is still visited.
+    pois = [make_poi("m", dwell_min=60, hours={"default": {"open": "09:00", "close": "10:00"}})]
+    anchors, win, m = base_line(1, [0])   # POI co-located with the base: zero travel
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1, stop_buffer_min=120)
+    assert res["feasible"] is True
+    assert _arrivals(res) == {"m": 540}   # still pinned to its only feasible arrival
+    assert res["dropped"] == [] and res["auto_dropped"] == []

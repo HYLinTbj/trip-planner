@@ -65,6 +65,7 @@ def plan_trip(
     time_limit_s: int = 5,
     balance: int = 0,
     locks: list[Lock] | None = None,
+    stop_buffer_min: int = 0,
 ) -> dict:
     """Solve an itinerary over per-day (start, end) anchors with per-day time windows.
 
@@ -171,8 +172,12 @@ def plan_trip(
         return 0 if node < n_anchor else active[node - n_anchor].dwell_min
 
     def time_cb(from_i, to_i):
+        # HYL-72: a per-stop contingency pad reserves real schedule time after each visit
+        # (pushing the next arrival) WITHOUT shrinking opening-hours windows or the reported
+        # visit duration — so it's distinct from bumping dwell. Anchors get no pad.
         f = manager.IndexToNode(from_i)
-        return dwell(f) + M[f][manager.IndexToNode(to_i)]
+        pad = stop_buffer_min if f >= n_anchor else 0
+        return dwell(f) + pad + M[f][manager.IndexToNode(to_i)]
 
     time_idx = routing.RegisterTransitCallback(time_cb)
     # Horizon spans the widest day; each day's own open/close is set on its start/end
