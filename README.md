@@ -267,3 +267,6 @@ preset city list (HYL-67) — and a trip can have **per-day start/end anchors** 
 moves town to town instead of orbiting one hotel (HYL-68). The solver picks the best POIs for
 each day's leg; drive it via `POST /plan-route` or the `plan_route` MCP tool (within one US
 region for now — cross-region routing awaits a national engine). Map UI for anchors is next.
+Each day can also carry its **own time window** (early start, chill day — HYL-69), and a trip
+can reserve **contingency buffers** for unexpected delays — per-leg travel padding (`×%` and/or
+flat minutes) plus a per-stop cushion — so the schedule isn't packed wall-to-wall (HYL-72).
