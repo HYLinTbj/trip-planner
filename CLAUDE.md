@@ -137,6 +137,10 @@ POIs are shed when a day can't hold everything), `balance` → a count dimension
 stops across days. User edits are **locks** turned into hard constraints: `exclude` (drop),
 `include` (must-visit, any day), `day` (must be on day N), `pin` (fixed arrival time).
 Infeasible locks return a graceful `feasible:false` reason rather than throwing.
+Two **contingency buffers** (HYL-72) reserve real schedule time: `stop_buffer_min` adds a
+per-stop pad **inside the time callback only** — it pushes later arrivals without shrinking
+opening-hours windows or the reported visit duration (so it's distinct from bumping `dwell`);
+the per-leg **travel buffer** is folded into the matrix upstream (see `matrix.py`).
 
 ### Travel-time matrix (`matrix.py`)
 Builds the integer-minute matrix the solver consumes (anchor/depot nodes first, then POIs).
@@ -145,6 +149,11 @@ so a different region/engine can't collide. For symmetric modes (foot/bicycle) a
 one-directional unreachable arc is mirrored from its reverse so one bad OSM edge doesn't
 strand a POI. Transit is special: Valhalla's matrix endpoint can't do multimodal, so the
 matrix is assembled from per-pair `/route` calls at one representative departure time.
+`inflate_travel()` optionally pads every *real* leg for contingency (HYL-72 travel buffer:
+`× pct` and/or `+ floor_min`, leaving co-located and `UNREACHABLE` arcs untouched). It runs in
+`main._solve` **after** the cache read and **before** the solve, so the padding feeds the
+objective, the Time dimension, and the reported travel alike — while the on-disk cache stays
+buffer-agnostic (the buffer is never baked into `matrix_cache.json`).
 
 ### Multi-city + regional engines
 POIs/trips are scoped by `city_slug` in Postgres (composite PK `(city_slug, id)`), so
@@ -161,7 +170,9 @@ name/lat/lon and keep `poi_id` as a *soft* reference (no FK), so a trip still re
 after a library POI is edited or deleted. A **route trip** (HYL-68, `mode="route"`) also
 persists its per-day anchors (`trip_day_anchors`) + candidate pool (`trip_pois`, soft
 `(city_slug, poi_id)` refs spanning towns) and solves through `_run_route`; a base trip
-keeps its single `base_*` and solves through `_run`. Because library ids are unique only
+keeps its single `base_*` and solves through `_run`. Persisted solve params include the
+HYL-72 buffer triple (`travel_buffer_pct`/`travel_buffer_min`/`stop_buffer_min`), so
+`reoptimize` reproduces the same cushions. Because library ids are unique only
 *within* a city but a route pool spans towns, `store.load_pois_by_refs` hands the solver
 **city-qualified ids** (`"city:id"`, `store.pool_poi_id`) so a slug shared across cities
 can't collide — route-mode stops/dropped and locks all speak that qualified id. API: `POST/GET/PUT/PATCH/DELETE /trips`

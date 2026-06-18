@@ -56,6 +56,21 @@ def test_day_windows_min_validates_count_and_order():
     assert main._day_windows_min([], "09:00", "19:00", 2) == [(540, 1140), (540, 1140)]
 
 
+def test_run_route_travel_buffer_raises_reported_travel(monkeypatch):
+    # HYL-72: a travel buffer pads every leg of the matrix, so the same route reports more
+    # travel time (the reserved contingency is real and visible in the schedule).
+    monkeypatch.setattr(main.places, "region_for_points", lambda pts: "west")
+    monkeypatch.setattr(main, "get_matrix_min",
+                        lambda coords, **kw: matrix_from_positions([0, 10, 3, 7], gap=10))
+    pois = [make_poi("p1", lat=3, lon=0), make_poi("p2", lat=7, lon=0)]
+    anchors = [((0, 0, "A"), (10, 0, "B"))]
+
+    plain = main._run_route(pois, anchors, "09:00", "19:00", 5, 1, "car", [])
+    padded = main._run_route(pois, anchors, "09:00", "19:00", 5, 1, "car", [],
+                             buffers=(50, 0, 0))   # +50% on every leg
+    assert padded["total_travel_min"] > plain["total_travel_min"]
+
+
 def test_run_route_rejects_cross_region(monkeypatch):
     monkeypatch.setattr(main.places, "region_for_points", lambda pts: None)
     with pytest.raises(main.HTTPException) as exc:

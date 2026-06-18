@@ -82,6 +82,17 @@ class Trip(Base):
     day_windows: Mapped[list] = mapped_column(JSON)
     profile: Mapped[str] = mapped_column(String)          # foot | car | bicycle | transit
     balance: Mapped[int] = mapped_column(Integer, default=0)
+    # HYL-72: contingency buffers (all reserve real schedule time). travel_buffer_pct/_min pad
+    # every leg (% and/or flat minutes); stop_buffer_min is a flat per-stop cushion.
+    travel_buffer_pct: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("'0'"), nullable=False
+    )
+    travel_buffer_min: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("'0'"), nullable=False
+    )
+    stop_buffer_min: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("'0'"), nullable=False
+    )
     # HYL-68: "base" = one hotel (base_lat/lon set); "route" = per-day start/end anchors
     # in trip_day_anchors (base_lat/lon NULL). Existing trips default to "base".
     mode: Mapped[str] = mapped_column(

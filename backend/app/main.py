@@ -15,7 +15,7 @@ from pathlib import Path
 import httpx
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from . import places, store
@@ -24,7 +24,7 @@ from .db import get_session
 from .engine import DEFAULT_PROFILE, base_url as engine_base_url, table_durations, to_minutes
 from .geocode import reverse as geocode_reverse, search as geocode_search
 from .llm import LLMNotConfigured, propose_candidates
-from .matrix import get_matrix_min
+from .matrix import get_matrix_min, inflate_travel
 from .models import DayAnchor, DayWindow, Lock, POICreate, SuggestRequest
 from .solver import hhmm_to_min, min_to_hhmm, plan_trip
 
@@ -166,7 +166,8 @@ def _day_windows_min(day_windows, start: str, end: str, num_days: int) -> list[t
     return out
 
 
-def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, locks, base) -> dict:
+def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, locks, base,
+           travel_buffer_pct=0, travel_buffer_min=0, stop_buffer_min=0) -> dict:
     """Core solve + map-shaping over per-day (start, end) anchors and per-day time windows.
 
     `anchors`: list of ((start_lat, start_lon, start_name), (end_lat, end_lon, end_name)),
@@ -174,6 +175,11 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
     the candidate pool. `base`: (lat, lon) for a single-base trip, else None. OR-Tools needs
     distinct start/end node indices, so each day's two anchors are separate (possibly
     co-located) nodes 0..2*num_days-1, then the POIs.
+
+    HYL-72 contingency buffers (all reserve real schedule time): `travel_buffer_pct`/
+    `travel_buffer_min` pad every leg of the matrix before the solve (so objective, Time
+    dimension, and reported travel stay consistent); `stop_buffer_min` adds a per-stop pad
+    inside the solver's Time callback without shrinking opening-hours windows.
     """
     by_id = {p.id: p for p in pois}
     anchor_coords = [(a[k][0], a[k][1]) for a in anchors for k in (0, 1)]
@@ -185,7 +191,10 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Routing engine unreachable: {exc}") from exc
 
-    res = plan_trip(pois, matrix, day_anchors, day_windows, time_limit, balance=balance, locks=locks)
+    # Pad every leg for contingency (kept out of the on-disk cache so it stays buffer-agnostic).
+    matrix = inflate_travel(matrix, travel_buffer_pct, travel_buffer_min)
+    res = plan_trip(pois, matrix, day_anchors, day_windows, time_limit, balance=balance,
+                    locks=locks, stop_buffer_min=stop_buffer_min)
 
     def stop_out(s: dict) -> dict:
         p = by_id[s["poi_id"]]
@@ -223,20 +232,24 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
 
 
 def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, profile, locks,
-         day_windows=None) -> dict:
+         day_windows=None, buffers=(0, 0, 0)) -> dict:
     """Base-mode solve: one hotel — every day starts and ends at the base. `day_windows`
-    (per-day (start_min, end_min)) defaults to the scalar start/end repeated for every day."""
+    (per-day (start_min, end_min)) defaults to the scalar start/end repeated for every day.
+    `buffers` is the HYL-72 (travel_pct, travel_min, stop_min) contingency triple."""
     pois = list(store.load_pois(city, db).values())
     anchors = [((base_lat, base_lon, None), (base_lat, base_lon, None)) for _ in range(days)]
     win = day_windows or [(hhmm_to_min(start), hhmm_to_min(end))] * days
     return _solve(pois, anchors, win, balance, time_limit,
-                  profile, _engine_url(city, db), locks, base=(base_lat, base_lon))
+                  profile, _engine_url(city, db), locks, base=(base_lat, base_lon),
+                  travel_buffer_pct=buffers[0], travel_buffer_min=buffers[1],
+                  stop_buffer_min=buffers[2])
 
 
 def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks,
-               day_windows=None) -> dict:
+               day_windows=None, buffers=(0, 0, 0)) -> dict:
     """Route-mode solve (HYL-68): per-day (start, end) anchors over a candidate `pois` pool,
-    with per-day time windows (HYL-69; defaults to the scalar start/end for every day).
+    with per-day time windows (HYL-69; defaults to the scalar start/end for every day) and
+    HYL-72 `buffers` = (travel_pct, travel_min, stop_min) contingency padding.
     Rejects a trip whose anchors/POIs cross regions — one regional engine can't route it yet."""
     # Region comes from the anchors (where the trip goes). We deliberately don't reverse-
     # geocode every POI too (it'd be many Nominatim calls) — a POI outside the region simply
@@ -251,7 +264,9 @@ def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks,
         )
     win = day_windows or [(hhmm_to_min(start), hhmm_to_min(end))] * len(anchors)
     return _solve(pois, anchors, win, balance, time_limit,
-                  profile, engine_base_url(region=region), locks, base=None)
+                  profile, engine_base_url(region=region), locks, base=None,
+                  travel_buffer_pct=buffers[0], travel_buffer_min=buffers[1],
+                  stop_buffer_min=buffers[2])
 
 
 @app.get("/plan")
@@ -278,14 +293,20 @@ class ReplanRequest(BaseModel):
     profile: str | None = None
     locks: list[Lock] = []
     day_windows: list[DayWindow] = []   # HYL-69: per-day overrides; empty = uniform start/end
+    # HYL-72 contingency buffers (all default to no-op): pad every leg by a % and/or a flat
+    # floor, and reserve a flat per-stop cushion. All reserve real time.
+    travel_buffer_pct: int = Field(0, ge=0, le=300)
+    travel_buffer_min: int = Field(0, ge=0)
+    stop_buffer_min: int = Field(0, ge=0)
 
 
 @app.post("/replan")
 def replan(req: ReplanRequest, db: Session = Depends(get_session)) -> dict:
     """Re-optimize honoring the user's locks — the 'you dispose' step."""
     win = _day_windows_min(req.day_windows, req.start, req.end, req.days)
+    buffers = (req.travel_buffer_pct, req.travel_buffer_min, req.stop_buffer_min)
     return _run(req.city, db, req.days, req.start, req.end, req.base_lat, req.base_lon,
-                req.balance, req.time_limit, req.profile, req.locks, win)
+                req.balance, req.time_limit, req.profile, req.locks, win, buffers)
 
 
 class POIRef(BaseModel):
@@ -307,6 +328,10 @@ class RoutePlanRequest(BaseModel):
     profile: str | None = None
     locks: list[Lock] = []
     day_windows: list[DayWindow] = []   # HYL-69: per-day overrides; empty = uniform start/end
+    # HYL-72 contingency buffers (all default to no-op); see ReplanRequest.
+    travel_buffer_pct: int = Field(0, ge=0, le=300)
+    travel_buffer_min: int = Field(0, ge=0)
+    stop_buffer_min: int = Field(0, ge=0)
 
 
 @app.post("/plan-route")
@@ -319,8 +344,9 @@ def plan_route(req: RoutePlanRequest, db: Session = Depends(get_session)) -> dic
     anchors = [((a.start_lat, a.start_lon, a.start_name), (a.end_lat, a.end_lon, a.end_name))
                for a in req.day_anchors]
     win = _day_windows_min(req.day_windows, req.start, req.end, len(req.day_anchors))
+    buffers = (req.travel_buffer_pct, req.travel_buffer_min, req.stop_buffer_min)
     return _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
-                      req.profile, req.locks, win)
+                      req.profile, req.locks, win, buffers)
 
 
 # --- POI library: list / create / delete (the write path behind "add a POI") --
@@ -423,6 +449,10 @@ class TripCreate(BaseModel):
     day_anchors: list[DayAnchor] = []  # route mode: per-day (start, end) anchors
     poi_refs: list[POIRef] = []        # route mode: the (city, id) candidate pool
     day_windows: list[DayWindow] = []  # HYL-69: per-day overrides; empty = uniform start/end
+    # HYL-72 contingency buffers (all default to no-op); persisted so re-optimize honors them.
+    travel_buffer_pct: int = Field(0, ge=0, le=300)
+    travel_buffer_min: int = Field(0, ge=0)
+    stop_buffer_min: int = Field(0, ge=0)
 
 
 class TripPatch(BaseModel):
@@ -475,6 +505,9 @@ def _trip_out(t, stops) -> dict:
         **_trip_summary(t, sum(len(d["stops"]) for d in days)),
         "notes": t.notes,
         "balance": t.balance,
+        "travel_buffer_pct": t.travel_buffer_pct,   # HYL-72 contingency buffers
+        "travel_buffer_min": t.travel_buffer_min,
+        "stop_buffer_min": t.stop_buffer_min,
         "days": days,
         "dropped": result.get("dropped", []),
         "locks": t.locks or [],
@@ -494,18 +527,20 @@ def _route_solve_and_meta(req: "TripCreate", db: Session):
     anchors = [((a.start_lat, a.start_lon, a.start_name), (a.end_lat, a.end_lon, a.end_name))
                for a in req.day_anchors]
     win = _day_windows_min(req.day_windows, req.start, req.end, len(req.day_anchors))
+    buffers = (req.travel_buffer_pct, req.travel_buffer_min, req.stop_buffer_min)
     result = req.result
     # Solve now (this is where the within-region guard runs); a client-supplied result is
     # trusted as-is — same as base mode — since it came from a prior region-checked solve.
     if result is None:   # the server's plan is the source of truth
         result = _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
-                            req.profile, req.locks, win)
+                            req.profile, req.locks, win, buffers)
         if not result.get("feasible", True):
             raise HTTPException(status_code=422,
                                 detail=f"Solve infeasible — nothing saved: {result.get('reason')}")
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
                 num_days=len(req.day_anchors), day_windows=[list(w) for w in win],
-                profile=req.profile, balance=req.balance, mode="route", base_lat=None, base_lon=None)
+                profile=req.profile, balance=req.balance, mode="route", base_lat=None, base_lon=None,
+                travel_buffer_pct=buffers[0], travel_buffer_min=buffers[1], stop_buffer_min=buffers[2])
     return meta, result, [a.model_dump() for a in req.day_anchors], [(r.city, r.id) for r in req.poi_refs]
 
 
@@ -524,17 +559,19 @@ def create_trip(req: TripCreate, db: Session = Depends(get_session)) -> dict:
         base_lat = c.base_lat if base_lat is None else base_lat
         base_lon = c.base_lon if base_lon is None else base_lon
     win = _day_windows_min(req.day_windows, req.start, req.end, req.days)
+    buffers = (req.travel_buffer_pct, req.travel_buffer_min, req.stop_buffer_min)
     result = req.result
     if result is None:   # solve now — the server's plan is the source of truth
         result = _run(req.city, db, req.days, req.start, req.end, base_lat, base_lon,
-                      req.balance, req.time_limit, req.profile, req.locks, win)
+                      req.balance, req.time_limit, req.profile, req.locks, win, buffers)
         if not result.get("feasible", True):
             raise HTTPException(status_code=422,
                                 detail=f"Solve infeasible — nothing saved: {result.get('reason')}")
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
                 num_days=req.days, day_windows=[list(w) for w in win],
                 profile=req.profile, balance=req.balance,
-                mode="base", base_lat=base_lat, base_lon=base_lon)
+                mode="base", base_lat=base_lat, base_lon=base_lon,
+                travel_buffer_pct=buffers[0], travel_buffer_min=buffers[1], stop_buffer_min=buffers[2])
     trip = store.save_trip(req.city, meta, [lk.model_dump() for lk in req.locks], result, db)
     return _trip_out(trip, store.trip_stops(trip.id, db))
 
@@ -578,17 +615,19 @@ def update_trip(trip_id: int, req: TripCreate, db: Session = Depends(get_session
     base_lat = t.base_lat if req.base_lat is None else req.base_lat
     base_lon = t.base_lon if req.base_lon is None else req.base_lon
     win = _day_windows_min(req.day_windows, req.start, req.end, req.days)
+    buffers = (req.travel_buffer_pct, req.travel_buffer_min, req.stop_buffer_min)
     result = req.result
     if result is None:
         result = _run(t.city_slug, db, req.days, req.start, req.end, base_lat, base_lon,
-                      req.balance, req.time_limit, req.profile, req.locks, win)
+                      req.balance, req.time_limit, req.profile, req.locks, win, buffers)
         if not result.get("feasible", True):
             raise HTTPException(status_code=422,
                                 detail=f"Solve infeasible — trip unchanged: {result.get('reason')}")
     meta = dict(title=req.title, status=req.status, notes=req.notes, start_date=req.start_date,
                 num_days=req.days, day_windows=[list(w) for w in win],
                 profile=req.profile, balance=req.balance,
-                mode="base", base_lat=base_lat, base_lon=base_lon)
+                mode="base", base_lat=base_lat, base_lon=base_lon,
+                travel_buffer_pct=buffers[0], travel_buffer_min=buffers[1], stop_buffer_min=buffers[2])
     # Pass empty anchors/pool so a trip switched route -> base drops its stale route rows.
     store.update_trip(t, meta, [lk.model_dump() for lk in req.locks], result, db,
                       anchors=[], poi_refs=[])
@@ -607,15 +646,16 @@ def reoptimize_trip(trip_id: int, time_limit: int = 3,
     win = [tuple(w) for w in (t.day_windows or [])]   # HYL-69: the stored per-day windows
     s_hhmm = min_to_hhmm(win[0][0]) if win else "09:00"   # fallback start/end (unused when win set)
     e_hhmm = min_to_hhmm(win[0][1]) if win else "19:00"
+    buffers = (t.travel_buffer_pct, t.travel_buffer_min, t.stop_buffer_min)   # HYL-72
     if t.mode == "route":
         rows = store.load_day_anchors(t.id, db)
         anchors = [((r.start_lat, r.start_lon, r.start_name), (r.end_lat, r.end_lon, r.end_name))
                    for r in rows]
         result = _run_route(store.load_trip_pool(t.id, db), anchors, s_hhmm, e_hhmm,
-                            t.balance, time_limit, t.profile, locks, win)
+                            t.balance, time_limit, t.profile, locks, win, buffers)
     else:
         result = _run(t.city_slug, db, t.num_days, s_hhmm, e_hhmm, t.base_lat, t.base_lon,
-                      t.balance, time_limit, t.profile, locks, win)
+                      t.balance, time_limit, t.profile, locks, win, buffers)
     if not result.get("feasible", True):
         raise HTTPException(status_code=422,
                             detail=f"Re-solve infeasible — trip unchanged: {result.get('reason')}")

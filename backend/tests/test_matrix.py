@@ -7,7 +7,7 @@ matrix, and `base_url` is always passed explicitly so no live engine is resolved
 import json
 
 from app import matrix
-from app.matrix import UNREACHABLE, _key, _repair_unreachable, get_matrix_min
+from app.matrix import UNREACHABLE, _key, _repair_unreachable, get_matrix_min, inflate_travel
 
 
 # --- cache key ---------------------------------------------------------------
@@ -106,3 +106,29 @@ def test_asymmetric_profile_skips_repair(monkeypatch):
     out = get_matrix_min([(0, 0), (1, 1)], profile="car", base_url="http://test")
     assert out[0][1] == 5
     assert out[1][0] == UNREACHABLE
+
+
+# --- HYL-72 travel buffer (inflate_travel) -----------------------------------
+
+def test_inflate_travel_noop_when_zero():
+    m = [[0, 10], [10, 0]]
+    out = inflate_travel(m, 0, 0)
+    assert out is m            # untouched object — cheap no-op default
+
+def test_inflate_travel_pct_and_floor():
+    m = [[0, 10, 5], [10, 0, 3], [5, 3, 0]]
+    out = inflate_travel(m, 20, 2)   # ceil(v*1.2) + 2
+    assert out[0][1] == 14           # ceil(12)+2
+    assert out[1][2] == 6            # ceil(3.6)=4, +2
+    assert out[0][2] == 8            # ceil(6)+2
+
+def test_inflate_travel_rounds_up():
+    # a 1-minute leg at +5% rounds up (never truncates contingency away)
+    assert inflate_travel([[0, 1], [1, 0]], 5, 0)[0][1] == 2   # ceil(1.05)=2
+
+def test_inflate_travel_leaves_zero_and_unreachable():
+    m = [[0, UNREACHABLE], [UNREACHABLE, 0]]
+    out = inflate_travel(m, 50, 9)
+    assert out[0][0] == 0                 # co-located/self leg never padded
+    assert out[0][1] == UNREACHABLE       # dead arc never revived
+    assert out is not m                   # but a copy is returned when knobs are set

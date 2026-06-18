@@ -9,11 +9,36 @@ Valhalla :8002 vs OSRM :5000, or foot vs car — can't return stale cross-backen
 
 import hashlib
 import json
+import math
 from pathlib import Path
 
 from .engine import DEFAULT_PROFILE, base_url as engine_base_url, table_durations
 
 UNREACHABLE = 10**6  # minutes; effectively bars an arc OSRM couldn't route
+
+
+def inflate_travel(m: list[list[int]], pct: int = 0, floor_min: int = 0) -> list[list[int]]:
+    """Return a copy of the minute-matrix with every *real* leg padded for contingency
+    (HYL-72): travel(i, j) -> ceil(v * (100 + pct) / 100) + floor_min.
+
+    Self/co-located legs (v == 0) and UNREACHABLE arcs are left untouched, so padding never
+    invents travel between a day's co-located start/end anchors nor revives a dead arc. The
+    cushion is reorder-safe — it rides on every transition the solver picks. Applied to the
+    matrix before the solve so the objective, the Time dimension, and the reported travel are
+    all consistent. A no-op (returns the input) when both knobs are zero.
+
+    Note: the inflated matrix also feeds the arc-cost objective, so a flat `floor_min` adds a
+    fixed cost to *every* leg — mildly favoring fewer hops and, at the margin, able to shed a
+    low-value POI via its disjunction penalty even when the day still has clock time for it.
+    `pct` scales uniformly (roughly order-preserving); the flat floor does not."""
+    if not pct and not floor_min:
+        return m
+    return [
+        [(math.ceil(v * (100 + pct) / 100) + floor_min) if 0 < v < UNREACHABLE else v
+         for v in row]
+        for row in m
+    ]
+
 
 # Modes where A->B and B->A are essentially the same trip (no one-way streets).
 _SYMMETRIC = {"foot", "bicycle"}

@@ -124,6 +124,18 @@
           <p class="hint muted">Each day's own start &amp; end — e.g. an early start, or a
             late, chill day. Re-optimize to apply.</p>
         </div>
+        <label class="perday-toggle">
+          <input type="checkbox" id="buffers-on" /> 🛟 Add contingency buffers
+        </label>
+        <div id="buffers-panel" hidden>
+          <div class="ctl">
+            <label>Travel +%<input id="buf-travel-pct" type="number" value="0" min="0" max="300" /></label>
+            <label>Travel +min<input id="buf-travel-min" type="number" value="0" min="0" /></label>
+            <label>Per stop +min<input id="buf-stop-min" type="number" value="0" min="0" /></label>
+          </div>
+          <p class="hint muted">Reserve slack for delays: pad every leg (by % and/or flat
+            minutes) and add a cushion after each stop. Re-optimize to apply.</p>
+        </div>
         <div class="btns">
           <button id="go">Plan (fresh)</button>
           <button id="reopt" class="secondary">Re-optimize</button>
