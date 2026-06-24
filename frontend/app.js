@@ -32,6 +32,9 @@ let currentTrip = null;    // null = unsaved draft; else { id, title, status, st
 let routeMode = false;     // HYL-68: per-day start/end anchors instead of one base
 let waypoints = [];        // [{name, lat, lon}] ordered; day i = waypoints[i] -> waypoints[i+1]
 let dayWindows = [];       // HYL-69: [{start,end}] per day, used when "customize each day" is on
+let showRoutes = false;    // HYL-70: draw actual road geometry instead of straight connectors
+let lastGeometry = null;   // per-day decoded [lat,lon] road paths for lastPlan (null = not fetched)
+let geometryPending = false; // guard so overlapping /route-geometry fetches don't pile up
 
 // Every POI/plan endpoint is city-scoped; append the picker's city to the query.
 const cityQ = () => (currentCity ? "?city=" + encodeURIComponent(currentCity) : "");
@@ -241,6 +244,7 @@ function updatePending() {
 }
 
 function render(p) {
+  if (p !== lastPlan) lastGeometry = null;   // a freshly solved/loaded plan invalidates cached geometry
   lastPlan = p;
   layer.clearLayers();
   const bounds = [];
@@ -277,7 +281,11 @@ function render(p) {
       bounds.push(ll);
     });
     pts.push(end);
-    L.polyline(pts, { color, weight: 3, opacity: 0.7, dashArray: "6,6" }).addTo(layer);
+    const geo = showRoutes && lastGeometry && lastGeometry[di];
+    if (geo && geo.length)
+      L.polyline(geo, { color, weight: 4, opacity: 0.85 }).addTo(layer);                 // actual road route
+    else
+      L.polyline(pts, { color, weight: 3, opacity: 0.7, dashArray: "6,6" }).addTo(layer); // straight connector
   });
 
   p.dropped.forEach((d) => {
@@ -295,6 +303,38 @@ function render(p) {
   touched.clear();
   updatePending();
   drawPool();
+  if (showRoutes && !lastGeometry) ensureGeometry();   // HYL-70: fetch real geometry, then re-render
+}
+
+// HYL-70: fetch decoded road geometry for the current plan and re-render with real routes.
+// A pure derived view (no solve): runs only when the toggle is on, once per plan, no overlap.
+async function ensureGeometry() {
+  if (!showRoutes || !lastPlan || lastGeometry || geometryPending) return;
+  const plan = lastPlan;
+  const days = plan.days.map((day) => {
+    const start = plan.base ? [plan.base.lat, plan.base.lon] : [day.start.lat, day.start.lon];
+    const end = plan.base ? [plan.base.lat, plan.base.lon] : [day.end.lat, day.end.lon];
+    return [start, ...day.stops.map((s) => [s.lat, s.lon]), end];
+  });
+  geometryPending = true;
+  try {
+    const res = await fetch("/route-geometry", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        city: currentCity, profile: val("profile"),
+        mode: plan.base ? "base" : "route", days,
+      }),
+    });
+    if (!res.ok) return;                         // non-fatal: keep the straight connectors
+    const data = await res.json();
+    if (lastPlan !== plan) return;               // a newer plan superseded this fetch
+    lastGeometry = data.days || null;
+    render(plan);                                // same ref -> no re-invalidation; draws the geometry
+  } catch (e) {
+    /* network error — keep straight lines */
+  } finally {
+    geometryPending = false;
+  }
 }
 
 function dayOptions(days, cur) {
@@ -779,6 +819,13 @@ async function runWpSearch(q) {
   });
 }
 $("routemode").addEventListener("change", () => setRouteMode($("routemode").checked));
+
+// HYL-70: toggle actual-route geometry. Re-renders the current plan (no solve); render()
+// lazily fetches geometry when it's on and not yet cached.
+$("show-routes").addEventListener("change", () => {
+  showRoutes = $("show-routes").checked;
+  if (lastPlan) render(lastPlan);
+});
 
 // ===== Trips: save / browse / load / lifecycle =============================
 function renderTripHeader() {

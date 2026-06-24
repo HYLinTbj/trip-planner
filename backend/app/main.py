@@ -21,7 +21,8 @@ from sqlalchemy.orm import Session
 from . import places, store
 from .candidates import ground
 from .db import get_session
-from .engine import DEFAULT_PROFILE, base_url as engine_base_url, table_durations, to_minutes
+from .engine import (DEFAULT_PROFILE, base_url as engine_base_url,
+                     route_geometry as engine_route_geometry, table_durations, to_minutes)
 from .geocode import reverse as geocode_reverse, search as geocode_search
 from .llm import LLMNotConfigured, propose_candidates
 from .matrix import get_matrix_min, inflate_travel
@@ -347,6 +348,37 @@ def plan_route(req: RoutePlanRequest, db: Session = Depends(get_session)) -> dic
     buffers = (req.travel_buffer_pct, req.travel_buffer_min, req.stop_buffer_min)
     return _run_route(pois, anchors, req.start, req.end, req.balance, req.time_limit,
                       req.profile, req.locks, win, buffers)
+
+
+class RouteGeometryRequest(BaseModel):
+    """HYL-70: fetch decoded road geometry for an already-solved plan so the map can draw the
+    real route instead of straight lines. `days` is the per-day ordered point list
+    [start/base, …stops, end/base] as (lat, lon). The engine is resolved exactly as the matching
+    solve did, so the geometry matches the solved costing. Derived/ephemeral — never persisted."""
+    city: str = DEFAULT_CITY
+    profile: str | None = None
+    mode: str = "base"                       # "route" resolves the region from the day anchors
+    days: list[list[tuple[float, float]]] = []
+
+
+@app.post("/route-geometry")
+def route_geometry(req: RouteGeometryRequest, db: Session = Depends(get_session)) -> dict:
+    """Decoded (lat, lon) road path per day for the submitted ordered points — no solve, no
+    persistence (a pure derived view, fetched only when the user toggles 'show actual routes').
+    A day the engine can't route comes back null and the frontend keeps a straight line for it."""
+    if req.mode == "route":
+        anchors = [day[k] for day in req.days if len(day) >= 2 for k in (0, -1)]
+        region = places.region_for_points(anchors)
+        if region is None:
+            raise HTTPException(
+                status_code=422,
+                detail="Route must lie within one supported US region "
+                       "(cross-region routing isn't supported yet).")
+        url = engine_base_url(region=region)
+    else:
+        url = _engine_url(req.city, db)
+    return {"days": [engine_route_geometry(day, req.profile, url) if len(day) >= 2 else None
+                     for day in req.days]}
 
 
 # --- POI library: list / create / delete (the write path behind "add a POI") --

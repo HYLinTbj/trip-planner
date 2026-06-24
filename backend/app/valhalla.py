@@ -17,6 +17,8 @@ from pathlib import Path
 
 import httpx
 
+from .polyline import decode_polyline
+
 VALHALLA_URL = os.environ.get("VALHALLA_URL", "http://localhost:8002")
 
 # Region -> engine URL registry (scale-up phase 2). Each regional Valhalla serves on
@@ -135,6 +137,77 @@ def _route_time(a, b, base_url: str, costing: str = "multimodal",
         return resp.json()["trip"]["summary"]["time"]
     except Exception:
         return None                  # no route -> solver treats the leg as unreachable
+
+
+def _route_shape(locations: list[tuple[float, float]], base_url: str, costing: str,
+                 depart: str | None) -> list[tuple[float, float]] | None:
+    """Decoded (lat, lon) path for ONE /route call over `locations`, or None on any error.
+    Valhalla returns a `shape` (encoded polyline, precision 6) per leg; decode each and
+    concatenate, dropping the point each leg shares with the previous one."""
+    body = {"locations": [_loc(lat, lon) for lat, lon in locations], "costing": costing}
+    if depart:
+        body["date_time"] = {"type": 1, "value": depart}     # transit needs a departure
+    try:
+        resp = httpx.post(f"{base_url}/route", json=body, timeout=60.0)
+        resp.raise_for_status()
+        legs = resp.json()["trip"]["legs"]
+    except Exception:
+        return None
+    path: list[tuple[float, float]] = []
+    for leg in legs:
+        pts = decode_polyline(leg["shape"])
+        if path and pts and path[-1] == pts[0]:
+            pts = pts[1:]                     # drop the seam shared with the previous leg
+        path.extend(pts)
+    return path
+
+
+def route_geometry(
+    coords: list[tuple[float, float]],
+    profile: str | None = None,
+    base_url: str = VALHALLA_URL,
+) -> list[tuple[float, float]] | None:
+    """Decoded (lat, lon) road path for the ordered `coords` (start → … → end), or None if
+    nothing could be routed (HYL-70 route visualization).
+
+    Fast path: one /route over all the day's waypoints. But the **pedestrian** costing can 500 a
+    multi-leg route when its expansion sweeps a malformed edge ("GetTags: offset exceeds size of
+    text list" — the same Valhalla bug matrix.py works around for /sources_to_targets), so on
+    failure we fall back to per-leg /route calls, retrying a failed symmetric-mode leg in reverse
+    (the bug is directional) and flipping the shape; a leg that fails both ways degrades to a
+    straight segment, keeping the path continuous. Mirrors table_durations' batch→pairwise
+    fallback. Returns None only when no leg yields real geometry (caller then draws a straight
+    line for the whole day).
+    """
+    if len(coords) < 2:
+        return None
+    costing = costing_for(profile)
+    depart = _depart() if costing == "multimodal" else None
+    path = _route_shape(coords, base_url, costing, depart)
+    if path:
+        return path
+    # Per-leg fallback. For symmetric modes (foot/bicycle) the bug is directional — a leg that
+    # 500s one way usually routes the other way — so retry reversed and flip the shape, the same
+    # trick matrix._repair_unreachable uses for the matrix.
+    symmetric = costing in ("pedestrian", "bicycle")
+    out: list[tuple[float, float]] = []
+    any_real = False
+    for a, b in zip(coords, coords[1:]):
+        leg = _route_shape([a, b], base_url, costing, depart)
+        if not leg and symmetric:
+            rev = _route_shape([b, a], base_url, costing, depart)
+            if rev:
+                leg = rev[::-1]               # same leg walked backwards
+        if leg:
+            any_real = True
+            if out and out[-1] == leg[0]:
+                leg = leg[1:]
+            out.extend(leg)
+        else:                                 # both directions failed -> straight to the next waypoint
+            if not out:
+                out.append(a)
+            out.append(b)
+    return out if any_real else None
 
 
 def _pairwise_matrix(coords, base_url: str, costing: str,
