@@ -226,6 +226,7 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
             for pid in (res["dropped"] + res["auto_dropped"])
         ],
         "total_travel_min": res["total_travel_min"],
+        "profile": profile or DEFAULT_PROFILE,   # the solved costing, so /route-geometry matches it
     }
     if base is not None:                      # base trips still expose a single "base"
         out["base"] = {"lat": base[0], "lon": base[1]}

@@ -311,6 +311,8 @@ function render(p) {
 async function ensureGeometry() {
   if (!showRoutes || !lastPlan || lastGeometry || geometryPending) return;
   const plan = lastPlan;
+  const profile = plan.profile || val("profile");   // the profile the plan was SOLVED with, not the
+                                                     // live dropdown (which may have changed since)
   const days = plan.days.map((day) => {
     const start = plan.base ? [plan.base.lat, plan.base.lon] : [day.start.lat, day.start.lon];
     const end = plan.base ? [plan.base.lat, plan.base.lon] : [day.end.lat, day.end.lon];
@@ -321,20 +323,23 @@ async function ensureGeometry() {
     const res = await fetch("/route-geometry", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        city: currentCity, profile: val("profile"),
+        city: currentCity, profile,
         mode: plan.base ? "base" : "route", days,
       }),
     });
-    if (!res.ok) return;                         // non-fatal: keep the straight connectors
-    const data = await res.json();
-    if (lastPlan !== plan) return;               // a newer plan superseded this fetch
-    lastGeometry = data.days || null;
-    render(plan);                                // same ref -> no re-invalidation; draws the geometry
+    if (res.ok && lastPlan === plan) {           // still the current plan: apply + draw
+      lastGeometry = (await res.json()).days || null;
+      render(plan);                              // same ref -> no re-invalidation
+    }
   } catch (e) {
     /* network error — keep straight lines */
   } finally {
     geometryPending = false;
   }
+  // If a re-solve superseded this fetch while it was in flight, that plan's own ensureGeometry()
+  // was blocked by the in-flight guard; now that the guard is clear, pick up the newer plan. Gated
+  // on the plan having changed so a failure for the *current* plan doesn't spin in a retry loop.
+  if (lastPlan !== plan && showRoutes && !lastGeometry) ensureGeometry();
 }
 
 function dayOptions(days, cur) {
