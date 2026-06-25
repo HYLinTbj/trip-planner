@@ -31,6 +31,8 @@ const cityMap = {};        // slug -> { label, base, has_transit, transit_operat
 let currentTrip = null;    // null = unsaved draft; else { id, title, status, start_date, notes }
 let routeMode = false;     // HYL-68: per-day start/end anchors instead of one base
 let waypoints = [];        // [{name, lat, lon}] ordered; day i = waypoints[i] -> waypoints[i+1]
+let poolCities = new Set(); // HYL-79: city slugs whose libraries feed the route candidate pool
+const poolCache = {};      // slug -> [pois] cache for non-current pool cities (current city = allPois)
 let dayWindows = [];       // HYL-69: [{start,end}] per day, used when "customize each day" is on
 let showRoutes = false;    // HYL-70: draw actual road geometry instead of straight connectors
 let lastGeometry = null;   // per-day decoded [lat,lon] road paths for lastPlan (null = not fetched)
@@ -81,7 +83,49 @@ function waypointAnchors() {   // the waypoint chain -> per-day (start, end) anc
   }
   return out;
 }
-const tripPoiRefs = () => allPois.map((p) => ({ city: currentCity, id: p.id }));
+// HYL-79: the route candidate pool can span several cities. `poolItems` is the active pool as
+// `{p, city}` pairs — in route mode the union of every checked city's library (the current city
+// reads live from `allPois`, others from `poolCache`); in base mode just the current city. The
+// backend already accepts cross-city `poi_refs` (store.load_pois_by_refs qualifies ids as
+// `city:id`), so no backend change is needed.
+function poolItems() {
+  if (!routeMode) return allPois.map((p) => ({ p, city: currentCity }));
+  const out = [];
+  poolCities.forEach((slug) => {
+    const list = slug === currentCity ? allPois : (poolCache[slug] || []);
+    list.forEach((p) => out.push({ p, city: slug }));
+  });
+  return out;
+}
+const tripPoiRefs = () => poolItems().map(({ p, city }) => ({ city, id: p.id }));
+
+// Fetch + cache a pool city's library (the current city already lives in `allPois`).
+async function loadPoolCity(slug) {
+  if (slug === currentCity || poolCache[slug]) return;
+  try {
+    const res = await fetch("/pois?city=" + encodeURIComponent(slug));
+    if (res.ok) poolCache[slug] = (await res.json()).pois || [];
+  } catch (e) { /* leave uncached; treated as empty until a retry */ }
+}
+
+// The checklist of places that feed the route pool. Rendered only in route mode.
+function renderPoolCities() {
+  const box = $("pool-cities");
+  if (!box) return;
+  box.innerHTML = Object.values(cityMap).map((c) =>
+    `<label class="pool-city">` +
+    `<input type="checkbox" data-slug="${esc(c.slug)}" ${poolCities.has(c.slug) ? "checked" : ""}` +
+    `${c.slug === currentCity ? " disabled" : ""}/> ${esc(c.label || c.slug)}` +
+    `</label>`).join("");
+  box.querySelectorAll("input").forEach((el) =>
+    el.addEventListener("change", () => togglePoolCity(el.dataset.slug, el.checked)));
+}
+
+async function togglePoolCity(slug, on) {
+  if (on) { poolCities.add(slug); await loadPoolCity(slug); }
+  else { poolCities.delete(slug); }
+  drawPool();   // pool only matters at the next solve; just refresh the map dots now
+}
 
 // ===== Per-day hours (HYL-69): one start/end per day, layered over the global default ====
 const perDayOn = () => $("perday") && $("perday").checked;
@@ -251,11 +295,20 @@ function render(p) {
   const routed = !p.base;   // route mode: per-day start/end anchors, no single base
 
   if (routed) {
-    // the waypoint chain: day 0's start, then each day's end (overnights + final)
-    const anchors = [p.days[0] && p.days[0].start, ...p.days.map((d) => d.end)].filter(Boolean);
+    // Anchor markers from each day's own start/end. A connected waypoint chain (day i's end ==
+    // day i+1's start) collapses to one marker per node; but /plan-route + the MCP tools allow
+    // DISJOINT legs (a day's start ≠ the prior day's end), so emit a fresh start marker whenever
+    // it differs from the running anchor (HYL-79 #2) instead of assuming the chain is connected.
+    const same = (a, b) => a && b && Math.abs(a.lat - b.lat) < 1e-7 && Math.abs(a.lon - b.lon) < 1e-7;
+    const anchors = [];
+    p.days.forEach((d) => {
+      if (!d.start || !d.end) return;
+      if (!same(anchors[anchors.length - 1], d.start)) anchors.push(d.start);
+      anchors.push(d.end);
+    });
     anchors.forEach((a, i) => {
       const label = i === 0 ? "A" : (i === anchors.length - 1 ? "Z" : String(i));
-      const where = i === 0 ? "start" : (i === anchors.length - 1 ? "end" : "overnight");
+      const where = i === 0 ? "start" : (i === anchors.length - 1 ? "end" : "stopover");
       const ll = [a.lat, a.lon];
       L.marker(ll, { icon: wpIcon(label) }).addTo(layer)
         .bindPopup(`<b>${esc(a.name || ("Stop " + (i + 1)))}</b><br>${where}`);
@@ -437,18 +490,25 @@ function drawPool() {
     lastPlan.days.forEach((d) => d.stops.forEach((s) => inPlan.add(s.poi_id)));
     lastPlan.dropped.forEach((d) => inPlan.add(d.poi_id));
   }
-  allPois.forEach((p) => {
+  poolItems().forEach(({ p, city }) => {
     // Route plans identify pooled POIs by a city-qualified id (store.pool_poi_id); base
     // plans use the bare library id. Match the plan's namespace so "already routed" POIs
-    // aren't redrawn as pending.
-    const planId = routeMode ? `${currentCity}:${p.id}` : p.id;
+    // aren't redrawn as pending. With a multi-city pool (HYL-79) each POI is namespaced by
+    // its OWN city, not whichever city happens to be selected.
+    const planId = routeMode ? `${city}:${p.id}` : p.id;
     metaOf[planId] = { name: p.name };
     if (inPlan.has(planId)) return;
     const tags = (p.tags || []).join(", ");
+    const fromOther = city !== currentCity;
+    const where = fromOther ? `in ${esc((cityMap[city] && cityMap[city].label) || city)}'s library`
+                            : "in library";
+    // The remove button deletes via the selected city's scope, so only offer it for the
+    // current city's own POIs (other cities' POIs are managed when that city is selected).
+    const rm = fromOther ? ""
+      : `<br><button class="linkbtn" onclick="removePoi('${p.id}')">✕ remove from library</button>`;
     L.marker([p.lat, p.lon], { icon: poolIcon() }).addTo(poolLayer).bindPopup(
       `<b>${esc(p.name)}</b>${tags ? `<br><span class="muted">${esc(tags)}</span>` : ""}` +
-      `<br><span class="muted">in library · Re-optimize to route</span>` +
-      `<br><button class="linkbtn" onclick="removePoi('${p.id}')">✕ remove from library</button>`
+      `<br><span class="muted">${where} · Re-optimize to route</span>${rm}`
     );
   });
 }
@@ -669,6 +729,8 @@ function selectCity(slug) {
   if (!slug || slug === currentCity) return;
   applyCity(slug);
   if (routeMode) { $("routemode").checked = false; setRouteMode(false); }  // anchors are place-specific
+  poolCities = new Set();                       // HYL-79: the route pool is place-specific too
+  Object.keys(poolCache).forEach((k) => delete poolCache[k]);
   locks = {}; touched.clear(); lastPlan = null;
   currentTrip = null; renderTripHeader();
   layer.clearLayers(); poolLayer.clearLayers(); clearCandidates();
@@ -701,6 +763,7 @@ async function loadCities(selectSlug) {
   group("Catalog cities", cities.filter((c) => !c.user_created));
   sel.onchange = () => selectCity(sel.value);
   if (selectSlug && cityMap[selectSlug]) sel.value = selectSlug;
+  if (routeMode) renderPoolCities();   // HYL-79: refresh the pool checklist against the new city list
   return cities.map((c) => c.slug);
 }
 
@@ -771,7 +834,10 @@ function setRouteMode(on) {
     const name = (c && c.base && c.base.name) || (c && c.label) || "Start";
     waypoints = [{ name, lat: +val("blat"), lon: +val("blon") }];
   }
+  if (on && currentCity) poolCities.add(currentCity);   // HYL-79: the current city always feeds the pool
+  renderPoolCities();
   renderWaypoints();
+  drawPool();   // reflect the (possibly multi-city) pool on the map right away
 }
 
 function renderWaypoints() {
@@ -927,10 +993,20 @@ window.loadTrip = async (id) => {
       waypoints.push({ name: t.days[0].start.name, lat: t.days[0].start.lat, lon: t.days[0].start.lon });
       t.days.forEach((d) => { if (d.end) waypoints.push({ name: d.end.name, lat: d.end.lat, lon: d.end.lon }); });
     }
+    // HYL-79: restore the multi-city pool. A route trip's stops/dropped carry city-qualified
+    // ids (`city:id`), so their distinct prefixes are exactly the cities that fed the pool.
+    poolCities = new Set([currentCity]);
+    const cityOf = (pid) =>
+      (typeof pid === "string" && pid.includes(":")) ? pid.slice(0, pid.indexOf(":")) : null;
+    t.days.forEach((d) => d.stops.forEach((s) => { const c = cityOf(s.poi_id); if (c) poolCities.add(c); }));
+    (t.dropped || []).forEach((dp) => { const c = cityOf(dp.poi_id); if (c) poolCities.add(c); });
+    await Promise.all([...poolCities].map(loadPoolCity));
+    renderPoolCities();
     renderWaypoints();
   } else {
     routeMode = false; $("routemode").checked = false; $("route-panel").hidden = true;
     document.querySelectorAll(".base-field").forEach((el) => { el.style.display = ""; });
+    poolCities = new Set();   // HYL-79: base trips have no cross-city pool
     $("days").value = t.num_days;
     $("blat").value = t.base.lat; $("blon").value = t.base.lon;
   }
