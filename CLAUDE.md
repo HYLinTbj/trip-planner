@@ -152,8 +152,13 @@ matrix is assembled from per-pair `/route` calls at one representative departure
 `inflate_travel()` optionally pads every *real* leg for contingency (HYL-72 travel buffer:
 `× pct` and/or `+ floor_min`, leaving co-located and `UNREACHABLE` arcs untouched). It runs in
 `main._solve` **after** the cache read and **before** the solve, so the padding feeds the
-objective, the Time dimension, and the reported travel alike — while the on-disk cache stays
-buffer-agnostic (the buffer is never baked into `matrix_cache.json`).
+objective and the Time dimension — while the on-disk cache stays buffer-agnostic (the buffer
+is never baked into `matrix_cache.json`). The solve runs on the inflated matrix but `plan_trip`
+also receives the **raw** matrix (`raw_matrix_min`), so reporting splits the two (HYL-92):
+`travel_min`/`total_travel_min` stay the honest road time while the reserved padding surfaces
+as its own `buffer_min`/`total_buffer_min` (per stop: `travel_in` + `buffer_in`) — so "travel"
+never silently includes slack. `stop_buffer_min` is separate again: it reserves time inside the
+Time callback only and was never part of `travel_min`.
 
 ### Multi-city + regional engines
 POIs/trips are scoped by `city_slug` in Postgres (composite PK `(city_slug, id)`), so

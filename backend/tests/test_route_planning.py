@@ -70,9 +70,10 @@ def test_day_windows_min_rejects_out_of_range_clock_values():
     assert e2.value.status_code == 422
 
 
-def test_run_route_travel_buffer_raises_reported_travel(monkeypatch):
-    # HYL-72: a travel buffer pads every leg of the matrix, so the same route reports more
-    # travel time (the reserved contingency is real and visible in the schedule).
+def test_run_route_travel_buffer_reported_separately_from_travel(monkeypatch):
+    # HYL-92: a travel buffer still reserves real schedule time, but reporting keeps it
+    # distinct — `total_travel_min` stays the honest road time (unchanged by the buffer)
+    # while the padding surfaces as `total_buffer_min` (per day + per stop too).
     monkeypatch.setattr(main.places, "region_for_points", lambda pts: "west")
     monkeypatch.setattr(main, "get_matrix_min",
                         lambda coords, **kw: matrix_from_positions([0, 10, 3, 7], gap=10))
@@ -82,7 +83,15 @@ def test_run_route_travel_buffer_raises_reported_travel(monkeypatch):
     plain = main._run_route(pois, anchors, "09:00", "19:00", 5, 1, "car", [])
     padded = main._run_route(pois, anchors, "09:00", "19:00", 5, 1, "car", [],
                              buffers=(50, 0, 0))   # +50% on every leg
-    assert padded["total_travel_min"] > plain["total_travel_min"]
+
+    # Real travel is identical — the buffer no longer inflates the reported road time.
+    assert padded["total_travel_min"] == plain["total_travel_min"]
+    assert plain["total_buffer_min"] == 0          # no buffer requested -> no padding
+    assert padded["total_buffer_min"] > 0          # the reserved cushion is visible on its own
+    # Per-day and per-stop breakdowns mirror the totals.
+    assert sum(d["buffer_min"] for d in padded["days"]) == padded["total_buffer_min"]
+    assert all(s["buffer_in"] == 0 for d in plain["days"] for s in d["stops"])
+    assert any(s["buffer_in"] > 0 for d in padded["days"] for s in d["stops"])
 
 
 def test_run_route_rejects_cross_region(monkeypatch):

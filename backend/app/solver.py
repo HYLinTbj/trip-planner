@@ -53,7 +53,7 @@ def _infeasible(reason: str, auto_dropped: list[str]) -> dict:
     return {
         "feasible": False, "reason": reason,
         "days": [], "dropped": [], "auto_dropped": auto_dropped,
-        "total_travel_min": 0,
+        "total_travel_min": 0, "total_buffer_min": 0,
     }
 
 
@@ -66,11 +66,18 @@ def plan_trip(
     balance: int = 0,
     locks: list[Lock] | None = None,
     stop_buffer_min: int = 0,
+    raw_matrix_min: list[list[int]] | None = None,
 ) -> dict:
     """Solve an itinerary over per-day (start, end) anchors with per-day time windows.
 
     matrix_min: square integer-minute matrix over [anchor nodes…, *pois] — anchor
       nodes occupy indices 0..A-1, POIs occupy A..A+len(pois)-1.
+    raw_matrix_min: the same matrix *before* the HYL-72 travel buffer was folded in
+      (`main.inflate_travel`). The solve still runs on the inflated `matrix_min` (so the
+      objective and Time dimension reserve the slack), but reporting reads real travel
+      from this raw matrix and surfaces the padding as a separate `buffer_min` per day /
+      `total_buffer_min` per trip — so "travel" stays honest (HYL-92). Defaults to
+      `matrix_min` (no buffer → zero everywhere).
     day_anchors: one (start_node, end_node) index pair per day (num_days =
       len(day_anchors)); every value indexes an anchor node. OR-Tools requires the
       start/end node indices to be distinct, so co-located anchors (a single base, or
@@ -158,6 +165,9 @@ def plan_trip(
     orig = {id(p): k for k, p in enumerate(pois)}
     idxs = list(range(n_anchor)) + [n_anchor + orig[id(p)] for p in active]
     M = [[matrix_min[i][j] for j in idxs] for i in idxs]
+    # The raw (un-padded) matrix in the same layout, for honest travel reporting (HYL-92).
+    raw = raw_matrix_min if raw_matrix_min is not None else matrix_min
+    M_raw = [[raw[i][j] for j in idxs] for i in idxs]
     n = len(active)
 
     # POI cumul domain: the union window across the whole horizon. Each day's tighter
@@ -241,33 +251,40 @@ def plan_trip(
     days = []
     visited = set()
     total_travel = 0
+    total_buffer = 0
     for v in range(num_days):
         idx = routing.Start(v)
         stops = []
         prev_node = manager.IndexToNode(idx)   # the day's start anchor
-        day_travel = 0
+        day_travel = 0       # real road time (raw matrix)
+        day_buffer = 0       # reserved HYL-72 travel padding (inflated − raw)
         while not routing.IsEnd(idx):
             node = manager.IndexToNode(idx)
             if node >= n_anchor:               # a POI (anchor depots are skipped)
                 poi = active[node - n_anchor]
                 visited.add(node)
                 arr = sol.Value(time_dim.CumulVar(idx))
-                leg = M[prev_node][node]
+                leg = M_raw[prev_node][node]
+                buf = M[prev_node][node] - leg
                 day_travel += leg
+                day_buffer += buf
                 stops.append({
                     "poi_id": poi.id, "name": poi.name, "arrival": arr,
                     "departure": arr + poi.dwell_min, "dwell": poi.dwell_min,
-                    "travel_in": leg,
+                    "travel_in": leg, "buffer_in": buf,
                 })
                 prev_node = node
             idx = sol.Value(routing.NextVar(idx))
         end_node = manager.IndexToNode(routing.End(v))
-        day_travel += M[prev_node][end_node]   # leg to the day's end anchor
+        day_travel += M_raw[prev_node][end_node]                  # leg to the day's end anchor
+        day_buffer += M[prev_node][end_node] - M_raw[prev_node][end_node]
         total_travel += day_travel
+        total_buffer += day_buffer
         days.append({
             "stops": stops,
             "return_min": sol.Value(time_dim.CumulVar(routing.End(v))),
             "travel_min": day_travel,
+            "buffer_min": day_buffer,
         })
 
     dropped = [active[node - n_anchor].id
@@ -275,5 +292,5 @@ def plan_trip(
     return {
         "feasible": True, "reason": None,
         "days": days, "dropped": dropped, "auto_dropped": auto_dropped,
-        "total_travel_min": total_travel,
+        "total_travel_min": total_travel, "total_buffer_min": total_buffer,
     }

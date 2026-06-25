@@ -299,7 +299,8 @@ function render(p) {
   if (bounds.length) map.fitBounds(bounds, { padding: [40, 40] });
   renderTimeline(p);
   const stops = p.days.reduce((a, d) => a + d.stops.length, 0);
-  setStatus(`${stops} stops · ${p.total_travel_min}m driving · ${p.dropped.length} dropped`);
+  const buf = p.total_buffer_min > 0 ? ` (+${p.total_buffer_min}m buffer)` : "";   // HYL-92: cushion kept distinct
+  setStatus(`${stops} stops · ${p.total_travel_min}m driving${buf} · ${p.dropped.length} dropped`);
   touched.clear();
   updatePending();
   drawPool();
@@ -348,6 +349,10 @@ function dayOptions(days, cur) {
   return o;
 }
 
+// HYL-92: a reserved-buffer suffix, shown only when contingency padding is in play, so
+// "Xm driving" always means real road time and the cushion reads as its own line.
+const bufTag = (m) => m > 0 ? ` <span class="buf">+${m}m buffer</span>` : "";
+
 function renderTimeline(p) {
   const days = p.days.length;
   const routed = !p.base;   // route mode: per-day start/end anchors
@@ -362,7 +367,7 @@ function renderTimeline(p) {
     h += `<div class="day"><h3><span class="dot" style="background:${color}"></span>${head}</h3>`;
     if (!day.stops.length) {
       h += routed
-        ? `<div class="leg muted">drive ${from} → ${to} — no stops · ${day.travel_min}m</div></div>`
+        ? `<div class="leg muted">drive ${from} → ${to} — no stops · ${day.travel_min}m${bufTag(day.buffer_min)}</div></div>`
         : `<div class="muted">(free day)</div></div>`;
       return;
     }
@@ -386,10 +391,10 @@ function renderTimeline(p) {
         `<button title="lock to this day" onclick="toggleLock('${s.poi_id}', ${di})">${lockedHere ? "🔒" : "🔓"}</button>` +
         `<button title="pin arrival time" onclick="pinStop('${s.poi_id}', ${di})">${pinned ? "📌" : "⏰"}</button>` +
         `<button title="remove from trip" onclick="excludeStop('${s.poi_id}')">${removePending ? "↺ keep" : "✕"}</button>` +
-        `<span class="muted">${s.dwell}m · +${s.travel_in}m</span>` +
+        `<span class="muted">${s.dwell}m · +${s.travel_in}m${s.buffer_in > 0 ? ` +${s.buffer_in}m buf` : ""}</span>` +
         `</div></div>`;
     });
-    h += `<div class="leg muted">${day.return_hhmm} · ${routed ? "arrive " + to : "back at base"} — ${day.stops.length} stops, ${day.travel_min}m driving</div></div>`;
+    h += `<div class="leg muted">${day.return_hhmm} · ${routed ? "arrive " + to : "back at base"} — ${day.stops.length} stops, ${day.travel_min}m driving${bufTag(day.buffer_min)}</div></div>`;
   });
 
   if (p.dropped.length) {
