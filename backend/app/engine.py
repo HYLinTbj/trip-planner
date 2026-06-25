@@ -32,3 +32,4 @@ else:
 # Re-exported so matrix.py / main.py never import a concrete engine module.
 table_durations = _engine.table_durations
 to_minutes = _engine.to_minutes
+route_geometry = _engine.route_geometry   # HYL-70: decoded (lat, lon) road path for a leg chain

@@ -22,6 +22,7 @@ def test_run_route_shapes_per_day_anchors(monkeypatch):
     res = main._run_route(pois, anchors, "09:00", "19:00", 5, 1, "car", [])
 
     assert res["feasible"] is True
+    assert res["profile"] == "car"                 # solved costing surfaced (HYL-70: /route-geometry matches it)
     assert "base" not in res                       # a route trip has no single base
     assert "day_start" not in res and "day_end" not in res   # HYL-69: no top-level envelope
     day = res["days"][0]

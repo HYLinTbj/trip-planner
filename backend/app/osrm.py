@@ -17,6 +17,8 @@ import os
 
 import httpx
 
+from .polyline import decode_polyline
+
 OSRM_FOOT_URL = os.environ.get("OSRM_FOOT_URL", "http://localhost:5000")
 OSRM_CAR_URL = os.environ.get("OSRM_CAR_URL", "http://localhost:5001")
 OSRM_URL_ALL = os.environ.get("OSRM_URL", "")  # if set, used for every profile
@@ -56,6 +58,33 @@ def table_durations(
     if data.get("code") != "Ok":
         raise RuntimeError(f"OSRM returned an error: {data}")
     return data["durations"]
+
+
+def route_geometry(
+    coords: list[tuple[float, float]],
+    profile: str | None = None,
+    base_url: str | None = None,
+) -> list[tuple[float, float]] | None:
+    """Decoded (lat, lon) road path for the ordered `coords`, or None if unroutable (HYL-70).
+
+    One /route call; `geometries=polyline6` matches Valhalla's precision-6 encoding so one
+    decoder serves both engines. NOTE: OSRM expects lon,lat in the URL (as in table_durations).
+    """
+    if len(coords) < 2:
+        return None
+    profile = profile or DEFAULT_PROFILE
+    base = base_url or url_for(profile)
+    locs = ";".join(f"{lon},{lat}" for lat, lon in coords)
+    url = f"{base}/route/v1/{profile}/{locs}"
+    try:
+        resp = httpx.get(url, params={"overview": "full", "geometries": "polyline6"}, timeout=30.0)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return None
+    if data.get("code") != "Ok" or not data.get("routes"):
+        return None
+    return decode_polyline(data["routes"][0]["geometry"]) or None
 
 
 def to_minutes(durations: list[list[float | None]]) -> list[list[float | None]]:
