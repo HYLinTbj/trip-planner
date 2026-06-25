@@ -183,3 +183,11 @@ button:disabled { opacity: .55; cursor: default; filter: none; }
 .wp-pin { width: 28px; height: 28px; border-radius: 6px; background: #8a2be2; color: #fff;
   font-weight: 700; font-size: 13px; display: flex; align-items: center; justify-content: center;
   border: 2px solid #fff; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+
+/* --- HYL-79: multi-city POI pool picker --- */
+.pool-pick { margin: 6px 0 8px; }
+.pool-pick-head { font-size: 11px; margin-bottom: 3px; }
+.pool-cities { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.pool-city { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #444; }
+.pool-city input { flex: 0 0 auto; }
+.pool-city input:disabled + * , .pool-city input:disabled { cursor: default; }

@@ -191,6 +191,12 @@ edits). Edits are staged **locally** as locks and only sent to the server on
 Re-optimize — `lastPlan` is re-rendered without a solve in between. All POI/LLM/Nominatim
 strings are untrusted; route every interpolated value through `esc()` (or `textContent`)
 before it reaches `innerHTML`/popups.
+Route mode's candidate pool can span cities (HYL-79): a checklist in the route panel picks
+which places' libraries feed the pool, and `poolItems()` unions them into the cross-city
+`poi_refs` the backend already accepts (`store.load_pois_by_refs`). The pool is reconstructed
+on load from the trip's city-qualified (`city:id`) stop/dropped ids — no backend change. Anchor
+markers are built from each day's own start/end so disjoint legs (a day's start ≠ the prior
+day's end, reachable via `/plan-route`/MCP) still render every node, not just a connected chain.
 
 ## Known inconsistencies (state of the migration)
 - The store moved from per-city JSON files to Postgres, but `README.md` and some scripts

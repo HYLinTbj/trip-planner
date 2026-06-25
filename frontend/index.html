@@ -98,8 +98,12 @@
             <div id="wp-results" class="results"></div>
           </div>
           <ol id="waypoints" class="waypoints"></ol>
-          <p class="hint muted">Each consecutive pair is one day (stop 1 → stop 2 = day 1). POIs from this
-            place's library fill each leg. Keep the whole route within one US region.</p>
+          <div class="pool-pick">
+            <div class="pool-pick-head muted">Pull POIs from these places:</div>
+            <div id="pool-cities" class="pool-cities"></div>
+          </div>
+          <p class="hint muted">Each consecutive pair is one day (stop 1 → stop 2 = day 1). Candidate POIs
+            come from every checked place's library above. Keep the whole route within one US region.</p>
         </div>
         <div class="ctl">
           <label class="base-field">Days<input id="days" type="number" value="2" min="1" /></label>
