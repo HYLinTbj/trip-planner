@@ -57,6 +57,19 @@ def test_day_windows_min_validates_count_and_order():
     assert main._day_windows_min([], "09:00", "19:00", 2) == [(540, 1140), (540, 1140)]
 
 
+def test_day_windows_min_rejects_out_of_range_clock_values():
+    # A syntactically HH:MM-looking value that isn't a real clock time (HYL-85) -> 422,
+    # not a silently malformed >24h window (e.g. 25:00 -> 1500 min with start < end).
+    for bad in ("25:00", "99:99", "12:70"):
+        with pytest.raises(main.HTTPException) as e:
+            main._day_windows_min([DayWindow(start=bad, end="19:00")], "09:00", "19:00", 1)
+        assert e.value.status_code == 422
+    # the end side is validated too
+    with pytest.raises(main.HTTPException) as e2:
+        main._day_windows_min([DayWindow(start="09:00", end="24:00")], "09:00", "19:00", 1)
+    assert e2.value.status_code == 422
+
+
 def test_run_route_travel_buffer_raises_reported_travel(monkeypatch):
     # HYL-72: a travel buffer pads every leg of the matrix, so the same route reports more
     # travel time (the reserved contingency is real and visible in the schedule).

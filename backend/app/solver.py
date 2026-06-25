@@ -134,10 +134,18 @@ def plan_trip(
     active_by_id = {p.id: p for p in active}
     bad_pins = []
     for pid, t in pin_of.items():
-        d = day_of.get(pid)
-        dw = day_windows[d] if (d is not None and 0 <= d < num_days) else (min_start, max_end)
-        low, high = _window(active_by_id[pid], *dw)
-        if not (low <= t <= high):
+        # The pin must land inside the POI's window on at least one day it's allowed on.
+        # Checking each candidate day (rather than the union (min_start, max_end), which can
+        # span a gap between two days' windows) means a day-less pin that falls in such a gap
+        # surfaces this pin-specific reason instead of the generic "couldn't fit" one (HYL-85).
+        poi = active_by_id[pid]
+        fits = False
+        for d in candidate_days(pid):
+            low, high = _window(poi, *day_windows[d])
+            if low <= t <= high:
+                fits = True
+                break
+        if not fits:
             bad_pins.append(pid)
     if bad_pins:
         return _infeasible(

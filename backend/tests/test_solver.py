@@ -289,6 +289,32 @@ def test_per_day_pin_valid_on_its_locked_day_despite_other_windows():
     assert stop_a["arrival"] == hhmm_to_min("13:00")
 
 
+def test_per_day_pin_without_day_lock_in_window_gap_is_infeasible():
+    # No day lock, so the pin may land on any day. Day 0 is 09:00-12:00 and day 1 is
+    # 15:00-18:00 — a 13:00 pin fits the union (09:00-18:00) but neither single day's
+    # window. It must fail gracefully with the *pin-specific* reason, not the generic
+    # "couldn't fit all locked stops" one (HYL-85).
+    pois = [make_poi("a", dwell_min=30), make_poi("b", dwell_min=30)]
+    anchors, _, m = base_line(2, [1, 2])
+    res = plan_trip(pois, m, anchors, [(540, 720), (900, 1080)], time_limit_s=1,
+                    locks=[Lock(poi_id="a", type="pin", time="13:00")])
+    assert res["feasible"] is False
+    assert "Pinned arrival time is outside" in res["reason"]
+    assert "a" in res["reason"]
+
+
+def test_per_day_pin_without_day_lock_fits_one_day():
+    # Same gapped windows, but a 16:00 pin lands inside day 1's 15:00-18:00 window — so a
+    # day-less pin that fits *some* day stays feasible and arrives at the pinned time.
+    pois = [make_poi("a", dwell_min=30), make_poi("b", dwell_min=30)]
+    anchors, _, m = base_line(2, [1, 2])
+    res = plan_trip(pois, m, anchors, [(540, 720), (900, 1080)], time_limit_s=1,
+                    locks=[Lock(poi_id="a", type="pin", time="16:00")])
+    assert res["feasible"] is True
+    stop_a = next(s for d in res["days"] for s in d["stops"] if s["poi_id"] == "a")
+    assert stop_a["arrival"] == hhmm_to_min("16:00")
+
+
 def test_per_day_short_day_caps_the_return_time():
     # Day 1's 09:00-11:00 window must bound that day's end cumul (return) at <= 11:00.
     pois = [make_poi(x, dwell_min=30) for x in ("a", "b", "c")]

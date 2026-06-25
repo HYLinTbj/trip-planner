@@ -86,7 +86,7 @@ const tripPoiRefs = () => allPois.map((p) => ({ city: currentCity, id: p.id }));
 // ===== Per-day hours (HYL-69): one start/end per day, layered over the global default ====
 const perDayOn = () => $("perday") && $("perday").checked;
 const dayCount = () => routeMode ? Math.max(1, waypoints.length - 1) : Math.max(1, +val("days") || 1);
-const HHMM = /^\d{1,2}:\d{2}$/;
+const HHMM = /^([01]?\d|2[0-3]):[0-5]\d$/;   // real clock value, not just \d:\d\d
 
 // Resize dayWindows to the current day count, seeding any new rows from the global start/end.
 function syncDayWindows() {
