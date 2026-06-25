@@ -192,6 +192,21 @@ def test_infeasible_pin_outside_window():
     assert res["days"] == []
 
 
+def test_pin_and_exclude_on_same_poi_is_graceful():
+    # Contradictory locks: 'a' is both pinned and excluded. exclude wins (it's dropped from the
+    # pool and not mandatory), so the pin has nothing to enforce. This must NOT KeyError on the
+    # pin pre-check — the solve proceeds and simply omits 'a' (reachable via the API/MCP, which,
+    # unlike the web UI, can attach two contradictory locks to one POI).
+    pois = [make_poi("a", dwell_min=30), make_poi("b", dwell_min=30)]
+    anchors, win, m = base_line(1, [1, 2])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
+                    locks=[Lock(poi_id="a", type="pin", day=0, time="11:00"),
+                           Lock(poi_id="a", type="exclude")])
+    assert res["feasible"] is True
+    visited = {s["poi_id"] for d in res["days"] for s in d["stops"]}
+    assert "a" not in visited and "b" in visited
+
+
 # --- balance -----------------------------------------------------------------
 
 def test_balance_avoids_a_dead_day():

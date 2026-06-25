@@ -7,7 +7,7 @@ exercises the within-region guard and the per-day-leg response shaping (HYL-68).
 import pytest
 
 from app import main
-from app.models import DayWindow
+from app.models import DayWindow, Lock
 from tests.conftest import make_poi, matrix_from_positions
 
 
@@ -68,6 +68,40 @@ def test_day_windows_min_rejects_out_of_range_clock_values():
     with pytest.raises(main.HTTPException) as e2:
         main._day_windows_min([DayWindow(start="09:00", end="24:00")], "09:00", "19:00", 1)
     assert e2.value.status_code == 422
+
+
+def test_day_windows_min_scalar_fallback_validates_clock():
+    # The empty-day_windows fallback (taken by /plan always, and /replan//plan-route when no
+    # per-day hours are set) must reject a bad scalar start/end too — not just the loop (HYL-85).
+    with pytest.raises(main.HTTPException) as e1:
+        main._day_windows_min([], "25:00", "19:00", 2)
+    assert e1.value.status_code == 422
+    with pytest.raises(main.HTTPException) as e2:
+        main._day_windows_min([], "09:00", "12:70", 2)
+    assert e2.value.status_code == 422
+
+
+def test_run_route_rejects_malformed_scalar_start(monkeypatch):
+    # A bad scalar start reaches the solve via _run_route's window fallback — must 422, not
+    # become a silently >24h window (HYL-85). Region is in-bounds so the window build is reached.
+    monkeypatch.setattr(main.places, "region_for_points", lambda pts: "west")
+    with pytest.raises(main.HTTPException) as e:
+        main._run_route([make_poi("p1", lat=3, lon=0)],
+                        [((0, 0, "A"), (10, 0, "B"))], "25:00", "19:00", 5, 1, "car", [])
+    assert e.value.status_code == 422
+
+
+def test_run_route_rejects_malformed_pin_time(monkeypatch):
+    # A pin lock's "HH:MM" is otherwise parsed by the solver's bare hhmm_to_min, where "12:70"
+    # would silently become 13:10. _solve validates every pin time first -> 422 (HYL-85).
+    monkeypatch.setattr(main.places, "region_for_points", lambda pts: "west")
+    monkeypatch.setattr(main, "get_matrix_min",
+                        lambda coords, **kw: matrix_from_positions([0, 10, 3], gap=10))
+    with pytest.raises(main.HTTPException) as e:
+        main._run_route([make_poi("p1", lat=3, lon=0)],
+                        [((0, 0, "A"), (10, 0, "B"))], "09:00", "19:00", 5, 1, "car",
+                        [Lock(poi_id="p1", type="pin", time="12:70")])
+    assert e.value.status_code == 422
 
 
 def test_run_route_travel_buffer_reported_separately_from_travel(monkeypatch):

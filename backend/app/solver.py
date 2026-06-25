@@ -141,11 +141,16 @@ def plan_trip(
     active_by_id = {p.id: p for p in active}
     bad_pins = []
     for pid, t in pin_of.items():
+        # A POI that's both pinned and excluded is in pin_of (which doesn't subtract excluded)
+        # but absent from active_by_id — exclude wins, so there's no pin to enforce. Skip it
+        # rather than KeyError-ing, keeping the graceful contract for contradictory locks.
+        poi = active_by_id.get(pid)
+        if poi is None:
+            continue
         # The pin must land inside the POI's window on at least one day it's allowed on.
         # Checking each candidate day (rather than the union (min_start, max_end), which can
         # span a gap between two days' windows) means a day-less pin that falls in such a gap
         # surfaces this pin-specific reason instead of the generic "couldn't fit" one (HYL-85).
-        poi = active_by_id[pid]
         fits = False
         for d in candidate_days(pid):
             low, high = _window(poi, *day_windows[d])
