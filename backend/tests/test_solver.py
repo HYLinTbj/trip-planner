@@ -10,6 +10,7 @@ Tiny hand-built matrices solve instantly, so every plan uses time_limit_s=1. Day
 09:00-19:00 (540-1140 minutes from midnight) unless a case needs otherwise.
 """
 
+from app.matrix import inflate_travel
 from app.models import Lock
 from app.solver import _window, hhmm_to_min, min_to_hhmm, plan_trip
 from tests.conftest import base_line, make_poi, matrix_from_positions, uniform_windows
@@ -191,6 +192,21 @@ def test_infeasible_pin_outside_window():
     assert res["days"] == []
 
 
+def test_pin_and_exclude_on_same_poi_is_graceful():
+    # Contradictory locks: 'a' is both pinned and excluded. exclude wins (it's dropped from the
+    # pool and not mandatory), so the pin has nothing to enforce. This must NOT KeyError on the
+    # pin pre-check — the solve proceeds and simply omits 'a' (reachable via the API/MCP, which,
+    # unlike the web UI, can attach two contradictory locks to one POI).
+    pois = [make_poi("a", dwell_min=30), make_poi("b", dwell_min=30)]
+    anchors, win, m = base_line(1, [1, 2])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1,
+                    locks=[Lock(poi_id="a", type="pin", day=0, time="11:00"),
+                           Lock(poi_id="a", type="exclude")])
+    assert res["feasible"] is True
+    visited = {s["poi_id"] for d in res["days"] for s in d["stops"]}
+    assert "a" not in visited and "b" in visited
+
+
 # --- balance -----------------------------------------------------------------
 
 def test_balance_avoids_a_dead_day():
@@ -356,3 +372,31 @@ def test_stop_buffer_does_not_shrink_opening_window():
     assert res["feasible"] is True
     assert _arrivals(res) == {"m": 540}   # still pinned to its only feasible arrival
     assert res["dropped"] == [] and res["auto_dropped"] == []
+
+
+# --- travel-buffer reporting (HYL-92) ----------------------------------------
+
+def test_travel_buffer_reported_apart_from_real_travel():
+    # Base trip: base(0) -> a(2) -> base(0), a one-way leg of 20 min each way (40 round trip).
+    # Solving on a +50% inflated matrix still reserves the slack, but travel_min reports the
+    # raw 40 and buffer_min reports the 20-min padding (half of 40) as its own number.
+    pois = [make_poi("a", dwell_min=30)]
+    anchors, win, raw = base_line(1, [2])         # |0-2|*10 = 20 per leg
+    inflated = inflate_travel(raw, pct=50)        # each 20-min leg -> 30 (buffer 10 each)
+    res = plan_trip(pois, inflated, anchors, win, time_limit_s=1, raw_matrix_min=raw)
+    assert res["feasible"] is True
+    day = res["days"][0]
+    assert day["travel_min"] == 40                # real round-trip road time, unpadded
+    assert day["buffer_min"] == 20                # the reserved contingency, kept separate
+    assert res["total_travel_min"] == 40 and res["total_buffer_min"] == 20
+    assert day["stops"][0]["travel_in"] == 20 and day["stops"][0]["buffer_in"] == 10
+
+
+def test_no_buffer_when_raw_matrix_omitted():
+    # Backward-compatible default: without a raw matrix, there's no padding to report.
+    pois = [make_poi("a", dwell_min=30)]
+    anchors, win, m = base_line(1, [2])
+    res = plan_trip(pois, m, anchors, win, time_limit_s=1)
+    assert res["days"][0]["buffer_min"] == 0
+    assert res["total_buffer_min"] == 0
+    assert res["days"][0]["stops"][0]["buffer_in"] == 0

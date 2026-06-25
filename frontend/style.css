@@ -41,6 +41,7 @@ button.pending { background: #f5a623; color: #222; font-weight: 600; }
 .row button { background: #eef0f5; color: #333; }
 .leg { font-size: 12px; margin: 3px 0; }
 .muted { color: #888; }
+.buf { color: #8a6d1f; }   /* HYL-92: reserved travel buffer, distinct from real driving time */
 
 .num { width: 26px; height: 26px; border-radius: 50%; color: #fff; font-weight: 700;
   font-size: 13px; display: flex; align-items: center; justify-content: center;

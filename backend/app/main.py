@@ -149,14 +149,26 @@ def matrix(city: str = DEFAULT_CITY, profile: str | None = None,
 _HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):[0-5]\d$")   # a real clock value, 00:00–23:59
 
 
+def _parse_hhmm(value, field: str = "time") -> int:
+    """Validate a user-supplied HH:MM clock value and convert it to minutes-from-midnight,
+    raising 422 on anything that isn't a real time (e.g. 25:00, 12:70). Every user time goes
+    through here — scalar start/end, per-day windows, and pin arrival — so a malformed value
+    can never reach `hhmm_to_min` and become a silently wrong/oversized minute (HYL-85)."""
+    if not isinstance(value, str) or not _HHMM_RE.match(value):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field} '{value}' is not a valid HH:MM time (00:00–23:59).")
+    return hhmm_to_min(value)
+
+
 def _day_windows_min(day_windows, start: str, end: str, num_days: int) -> list[tuple[int, int]]:
     """Per-day (start_min, end_min) windows for the solver (HYL-69). An empty `day_windows`
     expands the scalar `start`/`end` default to every day; otherwise there must be exactly
     one entry per day, each a valid HH:MM clock value with start < end (422 on a bad shape).
-    Validating the clock value here (not just start < end) stops a malformed input like
-    `25:00` from passing as a silently >24h window (HYL-85)."""
+    Both the scalar fallback and the per-day entries are validated via `_parse_hhmm`, so a
+    malformed input like `25:00` is rejected on every path, not just when day_windows is set."""
     if not day_windows:
-        return [(hhmm_to_min(start), hhmm_to_min(end))] * num_days
+        return [(_parse_hhmm(start, "start"), _parse_hhmm(end, "end"))] * num_days
     if len(day_windows) != num_days:
         raise HTTPException(
             status_code=422,
@@ -164,12 +176,7 @@ def _day_windows_min(day_windows, start: str, end: str, num_days: int) -> list[t
                    f"entr{'y' if num_days == 1 else 'ies'} (one per day); got {len(day_windows)}.")
     out = []
     for w in day_windows:
-        for label, t in (("start", w.start), ("end", w.end)):
-            if not _HHMM_RE.match(t):
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Day window {label} '{t}' is not a valid HH:MM time (00:00–23:59).")
-        ds, de = hhmm_to_min(w.start), hhmm_to_min(w.end)
+        ds, de = _parse_hhmm(w.start, "Day window start"), _parse_hhmm(w.end, "Day window end")
         if ds >= de:
             raise HTTPException(
                 status_code=422,
@@ -193,6 +200,12 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
     dimension, and reported travel stay consistent); `stop_buffer_min` adds a per-stop pad
     inside the solver's Time callback without shrinking opening-hours windows.
     """
+    # Validate every pin's arrival time before it reaches the solver's bare hhmm_to_min
+    # (where "12:70" would silently become 13:10). This is the shared choke for all solve
+    # paths — /plan, /replan, /plan-route, trips, reoptimize, and the MCP tools (HYL-85).
+    for lk in locks:
+        if lk.type == "pin" and lk.time is not None:
+            _parse_hhmm(lk.time, "Pinned arrival time")
     by_id = {p.id: p for p in pois}
     anchor_coords = [(a[k][0], a[k][1]) for a in anchors for k in (0, 1)]
     day_anchors = [(2 * i, 2 * i + 1) for i in range(len(anchors))]
@@ -204,9 +217,11 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
         raise HTTPException(status_code=502, detail=f"Routing engine unreachable: {exc}") from exc
 
     # Pad every leg for contingency (kept out of the on-disk cache so it stays buffer-agnostic).
-    matrix = inflate_travel(matrix, travel_buffer_pct, travel_buffer_min)
-    res = plan_trip(pois, matrix, day_anchors, day_windows, time_limit, balance=balance,
-                    locks=locks, stop_buffer_min=stop_buffer_min)
+    # The solve runs on the inflated matrix, but the raw one is handed alongside so reporting
+    # can split real travel from the reserved buffer (HYL-92).
+    inflated = inflate_travel(matrix, travel_buffer_pct, travel_buffer_min)
+    res = plan_trip(pois, inflated, day_anchors, day_windows, time_limit, balance=balance,
+                    locks=locks, stop_buffer_min=stop_buffer_min, raw_matrix_min=matrix)
 
     def stop_out(s: dict) -> dict:
         p = by_id[s["poi_id"]]
@@ -224,6 +239,7 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
                 "stops": [stop_out(s) for s in d["stops"]],
                 "return_hhmm": min_to_hhmm(d["return_min"]),
                 "travel_min": d["travel_min"],
+                "buffer_min": d["buffer_min"],   # HYL-92: reserved travel padding, kept distinct from travel
                 "day_start": min_to_hhmm(day_windows[i][0]),
                 "day_end": min_to_hhmm(day_windows[i][1]),
                 "start": {"lat": anchors[i][0][0], "lon": anchors[i][0][1], "name": anchors[i][0][2]},
@@ -237,6 +253,7 @@ def _solve(pois, anchors, day_windows, balance, time_limit, profile, base_url, l
             for pid in (res["dropped"] + res["auto_dropped"])
         ],
         "total_travel_min": res["total_travel_min"],
+        "total_buffer_min": res["total_buffer_min"],   # HYL-92: total reserved travel padding
         "profile": profile or DEFAULT_PROFILE,   # the solved costing, so /route-geometry matches it
     }
     if base is not None:                      # base trips still expose a single "base"
@@ -251,7 +268,7 @@ def _run(city, db, days, start, end, base_lat, base_lon, balance, time_limit, pr
     `buffers` is the HYL-72 (travel_pct, travel_min, stop_min) contingency triple."""
     pois = list(store.load_pois(city, db).values())
     anchors = [((base_lat, base_lon, None), (base_lat, base_lon, None)) for _ in range(days)]
-    win = day_windows or [(hhmm_to_min(start), hhmm_to_min(end))] * days
+    win = day_windows or _day_windows_min([], start, end, days)   # validates scalar start/end
     return _solve(pois, anchors, win, balance, time_limit,
                   profile, _engine_url(city, db), locks, base=(base_lat, base_lon),
                   travel_buffer_pct=buffers[0], travel_buffer_min=buffers[1],
@@ -275,7 +292,7 @@ def _run_route(pois, anchors, start, end, balance, time_limit, profile, locks,
             detail=("Route must lie within one supported US region — its anchors span "
                     "regions or fall outside coverage (cross-region routing isn't supported yet)."),
         )
-    win = day_windows or [(hhmm_to_min(start), hhmm_to_min(end))] * len(anchors)
+    win = day_windows or _day_windows_min([], start, end, len(anchors))   # validates scalar start/end
     return _solve(pois, anchors, win, balance, time_limit,
                   profile, engine_base_url(region=region), locks, base=None,
                   travel_buffer_pct=buffers[0], travel_buffer_min=buffers[1],
@@ -539,6 +556,7 @@ def _trip_out(t, stops) -> dict:
                 "departure_hhmm": min_to_hhmm(s.departure_min),
             } for s in day_stops],
             "travel_min": rd.get("travel_min"),
+            "buffer_min": rd.get("buffer_min"),   # HYL-92: reserved travel padding (from the result snapshot)
             "return_hhmm": rd.get("return_hhmm"),
             "day_start": min_to_hhmm(dw[0]) if dw else None,   # HYL-69: this day's own window
             "day_end": min_to_hhmm(dw[1]) if dw else None,
@@ -552,6 +570,7 @@ def _trip_out(t, stops) -> dict:
         "travel_buffer_pct": t.travel_buffer_pct,   # HYL-72 contingency buffers
         "travel_buffer_min": t.travel_buffer_min,
         "stop_buffer_min": t.stop_buffer_min,
+        "total_buffer_min": result.get("total_buffer_min"),   # HYL-92: total reserved travel padding
         "days": days,
         "dropped": result.get("dropped", []),
         "locks": t.locks or [],
