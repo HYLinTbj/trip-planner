@@ -300,7 +300,7 @@ function render(p) {
   renderTimeline(p);
   const stops = p.days.reduce((a, d) => a + d.stops.length, 0);
   const buf = p.total_buffer_min > 0 ? ` (+${p.total_buffer_min}m buffer)` : "";   // HYL-92: cushion kept distinct
-  setStatus(`${stops} stops · ${p.total_travel_min}m driving${buf} · ${p.dropped.length} dropped`);
+  setStatus(`${stops} stops · ${p.total_travel_min}m ${modeWords(p.profile).gerund}${buf} · ${p.dropped.length} dropped`);
   touched.clear();
   updatePending();
   drawPool();
@@ -349,13 +349,24 @@ function dayOptions(days, cur) {
   return o;
 }
 
-// HYL-92: a reserved-buffer suffix, shown only when contingency padding is in play, so
-// "Xm driving" always means real road time and the cushion reads as its own line.
+// HYL-92: a reserved-buffer suffix, shown only when contingency padding is in play, so the
+// reported travel time always means real moving time and the cushion reads as its own line.
 const bufTag = (m) => m > 0 ? ` <span class="buf">+${m}m buffer</span>` : "";
+
+// Mode-aware wording so the timeline reflects the chosen travel mode instead of always saying
+// "driving": `verb` for a leg ("walk A → B"), `gerund` for a duration ("Xm walking").
+const MODE_WORDS = {
+  foot: { verb: "walk", gerund: "walking" },
+  car: { verb: "drive", gerund: "driving" },
+  bicycle: { verb: "cycle", gerund: "cycling" },
+  transit: { verb: "transit", gerund: "transit" },
+};
+const modeWords = (profile) => MODE_WORDS[profile] || { verb: "travel", gerund: "travel" };
 
 function renderTimeline(p) {
   const days = p.days.length;
   const routed = !p.base;   // route mode: per-day start/end anchors
+  const mw = modeWords(p.profile);   // label legs/durations by the mode the plan was solved with
   const inDays = new Set(p.days.flatMap((d) => d.stops.map((s) => s.poi_id)));
   let h = "";
 
@@ -367,7 +378,7 @@ function renderTimeline(p) {
     h += `<div class="day"><h3><span class="dot" style="background:${color}"></span>${head}</h3>`;
     if (!day.stops.length) {
       h += routed
-        ? `<div class="leg muted">drive ${from} → ${to} — no stops · ${day.travel_min}m${bufTag(day.buffer_min)}</div></div>`
+        ? `<div class="leg muted">${mw.verb} ${from} → ${to} — no stops · ${day.travel_min}m${bufTag(day.buffer_min)}</div></div>`
         : `<div class="muted">(free day)</div></div>`;
       return;
     }
@@ -394,7 +405,7 @@ function renderTimeline(p) {
         `<span class="muted">${s.dwell}m · +${s.travel_in}m${s.buffer_in > 0 ? ` +${s.buffer_in}m buf` : ""}</span>` +
         `</div></div>`;
     });
-    h += `<div class="leg muted">${day.return_hhmm} · ${routed ? "arrive " + to : "back at base"} — ${day.stops.length} stops, ${day.travel_min}m driving${bufTag(day.buffer_min)}</div></div>`;
+    h += `<div class="leg muted">${day.return_hhmm} · ${routed ? "arrive " + to : "back at base"} — ${day.stops.length} stops, ${day.travel_min}m ${mw.gerund}${bufTag(day.buffer_min)}</div></div>`;
   });
 
   if (p.dropped.length) {
